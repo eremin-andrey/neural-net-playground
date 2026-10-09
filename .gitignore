@@ -1,0 +1,9 @@
+# Файлы сессий с Claude (диалоги и сырые логи) — только локально
+SESSION_*
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

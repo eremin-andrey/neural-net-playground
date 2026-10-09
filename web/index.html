@@ -1,0 +1,753 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Нейросеть учит функции</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --border: #d9dde3; --text: #1f2328; --muted: #6b7280;
+    --pos: #2563eb; --neg: #dc2626; --train: #2563eb; --test: #f59e0b; --grid: #eceef1;
+    --node: #e5e7eb; --ok: #16a34a; --accent: #2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111318; --panel: #1a1d24; --border: #2c313b; --text: #e6e8eb; --muted: #9aa3af;
+      --pos: #60a5fa; --neg: #f87171; --train: #60a5fa; --test: #fbbf24; --grid: #242833;
+      --node: #2c313b; --ok: #4ade80; --accent: #60a5fa;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  header { display: flex; align-items: center; gap: 8px; padding: 14px 20px 0; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0 16px 0 0; }
+  .tab { border: 1px solid var(--border); background: var(--panel); color: var(--text);
+         padding: 7px 18px; border-radius: 8px; cursor: pointer; font: inherit; font-weight: 600; }
+  .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  #status { margin-left: auto; font-variant-numeric: tabular-nums; }
+  #message { color: var(--test); padding: 4px 20px 0; min-height: 22px; }
+  main { padding: 6px 20px 20px; }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  button.btn { border: 1px solid var(--border); background: var(--panel); color: var(--text);
+               padding: 7px 14px; border-radius: 8px; cursor: pointer; font: inherit; }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; min-width: 110px; }
+  label.range { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  label.range b { color: var(--text); min-width: 36px; font-variant-numeric: tabular-nums; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+  .panel h2 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
+  canvas { display: block; }
+  .grow { flex: 1 1 420px; min-width: 0; }
+  .result { display: grid; grid-template-columns: 130px 1fr; gap: 6px 10px; align-items: baseline; }
+  .result span { color: var(--muted); }
+  .result b { font-size: 26px; font-variant-numeric: tabular-nums; }
+  input[type=range] { accent-color: var(--accent); }
+  .slider { display: grid; grid-template-columns: 30px 1fr 50px; align-items: center; gap: 8px; margin: 8px 0; }
+  .slider b { font-variant-numeric: tabular-nums; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  select.btn { padding: 6px 10px; }
+  #funcHint { color: var(--muted); font-size: 12px; margin: -4px 0 10px; }
+  /* таблица расчёта */
+  .calc-wrap { overflow-x: auto; }
+  .formula { color: var(--muted); margin: 0 0 8px; font-size: 13px; }
+  .formula code { color: var(--text); font: 13px ui-monospace, Menlo, monospace; }
+  table.calc { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; }
+  table.calc th, table.calc td { border-bottom: 1px solid var(--border); padding: 5px 8px; text-align: right; white-space: nowrap;
+                                 transition: background-color .2s; }
+  table.calc th { font-weight: 600; color: var(--muted); font-size: 12px; }
+  table.calc th:first-child, table.calc td:first-child { text-align: left; }
+  table.calc td small { display: block; color: var(--muted); font-size: 11px; }
+  table.calc .pos { color: var(--pos); } table.calc .neg { color: var(--neg); }
+  table.calc tfoot td { border-bottom: none; }
+  table.calc tfoot tr.total td { font-size: 15px; font-weight: 700; border-top: 2px solid var(--border); }
+  /* подсветка столбцов во время анимации прохода сигнала */
+  table.calc[data-stage="in"]  .c-in,
+  table.calc[data-stage="act"] .c-act,
+  table.calc[data-stage="out"] .c-out,
+  table.calc[data-stage="sum"] .c-sum { background: color-mix(in srgb, var(--test) 22%, transparent); }
+  canvas.surf { cursor: grab; touch-action: none; }
+  canvas.surf.drag { cursor: grabbing; }
+  .panel-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .panel-head h2 { margin: 0; }
+  .panel-head .controls { margin: 0; gap: 8px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Нейронная сеть: x1 × x2</h1>
+  <button class="tab active" data-tab="train">Обучение</button>
+  <button class="tab" data-tab="work">Работа</button>
+  <div id="status">Подключение…</div>
+</header>
+<div id="message"></div>
+
+<main>
+  <!-- ===== Обучение ===== -->
+  <section id="tab-train">
+    <div class="controls">
+      <label class="range">входы <select class="btn" id="domain"></select></label>
+      <label class="range">функция <select class="btn" id="func"></select></label>
+      <button class="btn primary" id="startBtn">▶ Старт</button>
+      <button class="btn" data-action="reset">↺ Сброс</button>
+      <button class="btn" data-action="save">Сохранить веса</button>
+      <button class="btn" data-action="load">Загрузить веса</button>
+      <label class="range">скорость обучения
+        <input type="range" id="lr" min="0.01" max="1" step="0.01" value="0.3"><b id="lrVal">0.30</b></label>
+      <label class="range">эпох за шаг
+        <input type="range" id="speed" min="1" max="30" step="1" value="2"><b id="speedVal">2</b></label>
+      <label class="range"><input type="checkbox" class="showW" checked> показывать веса</label>
+      <label class="range" title="третий входной нейрон получает квадрат расстояния до центра; сеть при этом сбрасывается">
+        <input type="checkbox" id="r2"> подсказка: третий вход r² = x1² + x2²</label>
+    </div>
+    <div id="funcHint"></div>
+    <div class="row">
+      <div class="panel"><h2>Схема сети</h2><canvas id="netTrain" width="560" height="460"></canvas></div>
+      <div class="panel grow"><h2>Ошибка (MSE) по эпохам, логарифмическая шкала</h2><canvas id="loss" height="460"></canvas></div>
+    </div>
+    <div class="row">
+      <div class="panel"><h2>Правильный ответ <span class="formulaName">x1 × x2</span></h2><canvas id="mapTrue" width="250" height="250"></canvas></div>
+      <div class="panel"><h2>Ответ сети</h2><canvas id="mapNet" width="250" height="250"></canvas></div>
+      <div class="panel"><h2>Ошибка |сеть − правильный| (красный ≥ <span id="errScale">0.05</span>)</h2><canvas id="mapErr" width="250" height="250"></canvas></div>
+    </div>
+    <div class="row">
+      <div class="panel">
+        <div class="panel-head"><h2>График <span class="formulaName">x1 × x2</span> в координатах x1, x2</h2>
+          <div class="controls">
+            <select class="btn surfMode"><option value="true">функция</option><option value="net">ответ сети</option>
+              <option value="both">обе: функция — сетка, сеть — поверхность</option></select>
+            <button class="btn surfReset" title="вернуть исходный ракурс">↺ Вид</button></div></div>
+        <canvas id="surfTrain" class="surf" width="640" height="440"></canvas>
+        <div class="hint">Тяните мышью — повернуть, колесо — наклон.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== Работа ===== -->
+  <section id="tab-work" hidden>
+    <div class="row">
+      <div style="flex: 0 1 360px; display: flex; flex-direction: column; gap: 12px;">
+        <div class="panel">
+          <h2>Входы</h2>
+          <div class="slider"><span>x1</span><input type="range" id="x1" min="0" max="1" step="0.01" value="0.5"><b id="x1Val">0.50</b></div>
+          <div class="slider"><span>x2</span><input type="range" id="x2" min="0" max="1" step="0.01" value="0.5"><b id="x2Val">0.50</b></div>
+          <div class="hint" id="r2Val" hidden></div>
+          <button class="btn" id="randomBtn">Случайный пример</button>
+        </div>
+        <div class="panel">
+          <h2>Результат</h2>
+          <div class="result">
+            <span>Ответ сети</span><b id="resNet">—</b>
+            <span>Точно <span class="formulaName">x1 × x2</span></span><b id="resTrue">—</b>
+            <span>Ошибка</span><b id="resErr">—</b>
+          </div>
+          <div class="hint" id="workHint"></div>
+        </div>
+        <div class="panel"><h2>Ответ сети по всей области, ● — текущая точка</h2><canvas id="mapWork" width="250" height="250"></canvas></div>
+      </div>
+      <div class="panel grow"><h2>Сеть в работе (цвет нейрона — его активация, число в кружке — значение)</h2>
+        <div class="controls" style="margin: 4px 0 6px;">
+          <button class="btn primary" id="animBtn">▶ Проход сигнала</button>
+          <label class="range"><input type="checkbox" id="autoAnim" checked> при смене входов</label>
+          <label class="range"><input type="checkbox" class="showW" checked> показывать веса</label>
+        </div>
+        <canvas id="netWork" width="620" height="500"></canvas></div>
+    </div>
+    <div class="row">
+      <div class="panel">
+        <div class="panel-head"><h2>График <span class="formulaName">x1 × x2</span> в координатах x1, x2, ● — текущая точка</h2>
+          <div class="controls">
+            <select class="btn surfMode"><option value="true">функция</option><option value="net">ответ сети</option>
+              <option value="both">обе: функция — сетка, сеть — поверхность</option></select>
+            <button class="btn surfReset" title="вернуть исходный ракурс">↺ Вид</button></div></div>
+        <canvas id="surfWork" class="surf" width="640" height="440"></canvas>
+        <div class="hint">Тяните мышью — повернуть, колесо — наклон. Белая точка — ответ сети, линия опущена до «пола».</div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Расчёт по нейронной сети для текущих x1, x2</h2>
+      <p class="formula">Каждый скрытый нейрон: <code id="zFormula">z = w₁·x1 + w₂·x2 + b</code>, затем <code>h = σ(z) = 1 / (1 + e<sup>−z</sup>)</code>.
+        Выход: <code>y = Σ h·w<sub>вых</sub> + b<sub>вых</sub></code>. Под каждым числом — как оно получено.</p>
+      <div class="calc-wrap"><table class="calc" id="calc"></table></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+// ---------- состояние, полученное с сервера ----------
+let S = null;                       // последнее состояние сети
+let histTrain = [], histTest = [];  // история ошибки (накапливается по кусочкам)
+let tab = "train";
+let synced = false;
+let showWeights = true;
+let range = [0, 1];                 // диапазон значений выбранной функции (у суммы 0..2)
+let inputs = [0, 1];                // диапазон входов x1, x2: 0..1 или −1..+1
+const normIn = v => (v - inputs[0]) / (inputs[1] - inputs[0]);
+const norm = v => (v - range[0]) / (range[1] - range[0]);
+const valueColorN = v => valueColor(norm(v));
+try { showWeights = localStorage.getItem("showWeights") !== "0"; } catch (e) {}
+
+// ---------- цвета ----------
+const STOPS = [[0, [30, 27, 75]], [0.35, [37, 99, 235]], [0.65, [20, 184, 166]], [1, [250, 204, 21]]];
+function valueColor(v) {
+  v = Math.min(1, Math.max(0, v));
+  for (let k = 0; k < STOPS.length - 1; k++) {
+    const [a, ca] = STOPS[k], [b, cb] = STOPS[k + 1];
+    if (v <= b) {
+      const t = (v - a) / (b - a);
+      return `rgb(${ca.map((c, i) => Math.round(c + (cb[i] - c) * t)).join(",")})`;
+    }
+  }
+}
+function errorColor(e, scale = 0.05) {
+  const t = Math.min(1, Math.abs(e) / scale);
+  const g = Math.round(255 - 220 * t);
+  return `rgb(255,${g},${g})`;
+}
+
+// ---------- canvas с учётом Retina ----------
+function setup(cv, w, h) {
+  const dpr = window.devicePixelRatio || 1;
+  w = w || cv.clientWidth || +cv.getAttribute("width");
+  h = h || +cv.getAttribute("height");
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    cv.style.width = w + "px"; cv.style.height = h + "px";
+  }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  return [ctx, w, h];
+}
+document.querySelectorAll("canvas").forEach(cv => {
+  cv.dataset.w = cv.getAttribute("width"); cv.dataset.h = cv.getAttribute("height");
+});
+const dims = cv => [+cv.dataset.w, +cv.dataset.h];
+
+// ---------- цветная карта ----------
+function drawMap(cv, func, colorer, mark) {
+  const [ctx, w, h] = setup(cv, ...dims(cv));
+  const L = 28, T = 4, size = Math.min(w - L - 4, h - T - 24), n = S.grid.length, c = size / n;
+  for (let i = 0; i < n; i++)
+    for (let j = 0; j < n; j++) {
+      ctx.fillStyle = colorer(func(i, j));
+      ctx.fillRect(L + i * c, T + (n - 1 - j) * c, c + 0.5, c + 0.5);
+    }
+  ctx.strokeStyle = css("--border"); ctx.strokeRect(L, T, size, size);
+  ctx.fillStyle = css("--muted"); ctx.font = "11px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("x1 →", L + size / 2, T + size + 16);
+  const num = v => (v < 0 ? "−" : "") + Math.abs(v);
+  ctx.fillText(num(inputs[0]), L, T + size + 16); ctx.fillText(num(inputs[1]), L + size, T + size + 16);
+  ctx.save(); ctx.translate(12, T + size / 2); ctx.rotate(-Math.PI / 2); ctx.fillText("x2 →", 0, 0); ctx.restore();
+  if (mark) {
+    const x = L + normIn(mark[0]) * size, y = T + (1 - normIn(mark[1])) * size;
+    ctx.lineWidth = 4; ctx.strokeStyle = "#fff"; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = "#000"; ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke();
+  }
+}
+
+// ---------- схема сети ----------
+// Фазы анимации прохода сигнала (доли от общего времени):
+// 0 — горят входы, 1 — сигнал бежит к скрытому слою, 2 — скрытые нейроны «загораются»,
+// 3 — сигнал бежит к выходу, 4 — появляется ответ.
+const PHASES = [0, 0.12, 0.42, 0.55, 0.85, 1];
+const ANIM_MS = 2400;
+function phaseOf(p) {
+  for (let k = 0; k < 5; k++) if (p < PHASES[k + 1]) return [k, (p - PHASES[k]) / (PHASES[k + 1] - PHASES[k])];
+  return [5, 1];
+}
+
+// p — прогресс анимации 0..1, null — без анимации (всё показано сразу)
+function drawNetwork(cv, net, input, out, p = null) {
+  const [phase, t] = p == null ? [5, 1] : phaseOf(p);
+  const hiddenK = !out ? 0 : phase > 2 ? 1 : phase === 2 ? t : 0;   // насколько «загорелись» скрытые
+  const outK = !out ? 0 : phase > 4 ? 1 : phase === 4 ? t : 0;      // и выход
+  const [ctx, w, h] = setup(cv, ...dims(cv));
+  const nh = net.w2.length, nin = net.w1[0].length;   // nin = 3, если включена подсказка r²
+  if (input && nin === 3) input = [input[0], input[1], input[0] ** 2 + input[1] ** 2];
+  const xs = [70, w / 2, w - 80];
+  const inY = nin === 3 ? [h / 4, h / 2, 3 * h / 4] : [h / 3, 2 * h / 3], outY = h / 2;
+  const IN_NAMES = ["x1", "x2", "r²"];
+  // цвет входного нейрона: x1, x2 — по диапазону входов, r² — от 0 до своего максимума
+  const maxR2 = 2 * Math.max(inputs[0] ** 2, inputs[1] ** 2);
+  const normInput = (i, v) => i < 2 ? normIn(v) : v / maxR2;
+  const hidY = Array.from({ length: nh }, (_, j) => 22 + (h - 64) * (j + 0.5) / nh);
+  const line = (x0, y0, x1, y1, wt) => {
+    ctx.strokeStyle = wt >= 0 ? css("--pos") : css("--neg");
+    ctx.lineWidth = Math.max(0.5, Math.min(8, Math.abs(wt) * 1.6));
+    ctx.globalAlpha = 0.85;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    ctx.globalAlpha = 1;
+  };
+  for (let j = 0; j < nh; j++) {
+    for (let i = 0; i < nin; i++) line(xs[0], inY[i], xs[1], hidY[j], net.w1[j][i]);
+    line(xs[1], hidY[j], xs[2], outY, net.w2[j]);
+  }
+  // value — уже нормированное значение 0..1 (для цвета), k — яркость появления 0..1
+  const node = (x, y, r, value, label, k = 1) => {
+    if (value != null && k < 1) {  // ещё не «загорелся» — серый кружок, поверх проявляется цвет
+      node(x, y, r, null, "");
+      if (k <= 0) return;
+      ctx.globalAlpha = k;
+    }
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 7);
+    ctx.fillStyle = value == null ? css("--node") : valueColor(value); ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = css("--text"); ctx.stroke();
+    ctx.globalAlpha = 1;
+    if (label && k > 0.5) {
+      ctx.fillStyle = value != null && value < 0.55 ? "#fff" : "#1f2328";
+      if (value == null) ctx.fillStyle = css("--text");
+      ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(label, x, y);
+    }
+  };
+  const rSmall = Math.min(15, (h - 50) / nh / 2 - 2);
+  // Бегущие точки сигнала: размер — величина вклада |вес × значение|, цвет — знак
+  const dot = (x0, y0, x1, y1, tt, v) => {
+    const r = 2.5 + Math.min(6, Math.abs(v) * 5);
+    ctx.fillStyle = v >= 0 ? css("--pos") : css("--neg");
+    ctx.strokeStyle = css("--panel"); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(x0 + (x1 - x0) * tt, y0 + (y1 - y0) * tt, r, 0, 7); ctx.fill(); ctx.stroke();
+  };
+  const ease = tt => tt < 0.5 ? 2 * tt * tt : 1 - (2 - 2 * tt) ** 2 / 2;
+  if (input && out && phase === 1)
+    for (let j = 0; j < nh; j++)
+      for (let i = 0; i < nin; i++) dot(xs[0], inY[i], xs[1], hidY[j], ease(t), net.w1[j][i] * input[i]);
+  if (out && phase === 3)
+    for (let j = 0; j < nh; j++) dot(xs[1], hidY[j], xs[2], outY, ease(t), net.w2[j] * out.hidden[j]);
+
+  // Подсветка («ореол») слоя, который сейчас работает
+  const halo = (x, y, r) => {
+    ctx.strokeStyle = css("--test"); ctx.lineWidth = 4; ctx.globalAlpha = 0.8;
+    ctx.beginPath(); ctx.arc(x, y, r + 5, 0, 7); ctx.stroke(); ctx.globalAlpha = 1;
+  };
+  if (p != null && input && (phase === 0 || phase === 1)) for (let i = 0; i < nin; i++) halo(xs[0], inY[i], 24);
+  if (p != null && (phase === 2 || phase === 3)) for (let j = 0; j < nh; j++) halo(xs[1], hidY[j], rSmall);
+  if (p != null && phase === 4) halo(xs[2], outY, 26);
+
+  for (let i = 0; i < nin; i++) node(xs[0], inY[i], 24, input ? normInput(i, input[i]) : null, input ? input[i].toFixed(2) : IN_NAMES[i]);
+  if (nin === 3) {  // пометить, что третий вход — подсказка
+    ctx.fillStyle = css("--muted"); ctx.font = "10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+    ctx.fillText(input ? "r² (подсказка)" : "подсказка", xs[0], inY[2] + 38);
+  }
+  for (let j = 0; j < nh; j++) node(xs[1], hidY[j], rSmall, out ? out.hidden[j] : null, out && rSmall >= 14 ? out.hidden[j].toFixed(2) : "", hiddenK);
+  node(xs[2], outY, 26, out ? norm(out.y) : null, out ? out.y.toFixed(3) : "y", out ? outK : 1);
+
+  if (showWeights) {
+    // Подпись в «таблетке» цвета фона, чтобы читалась поверх линий
+    const tag = (x, y, text, color, font = "bold 10px sans-serif") => {
+      ctx.font = font; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      const tw = ctx.measureText(text).width + 6;
+      ctx.fillStyle = css("--panel"); ctx.globalAlpha = 0.9;
+      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x - tw / 2, y - 7, tw, 14, 4) : ctx.rect(x - tw / 2, y - 7, tw, 14); ctx.fill();
+      ctx.globalAlpha = 1; ctx.fillStyle = color; ctx.fillText(text, x, y);
+    };
+    const fmt = v => (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2);
+    const wColor = v => v >= 0 ? css("--pos") : css("--neg");
+    const at = (x0, y0, x1, y1, t) => [x0 + (x1 - x0) * t, y0 + (y1 - y0) * t];
+    const T_IN = nin === 3 ? [0.52, 0.80, 0.66] : [0.58, 0.80];  // разные места для разных входов, чтобы подписи не налезали
+    for (let j = 0; j < nh; j++) {
+      for (let i = 0; i < nin; i++) tag(...at(xs[0], inY[i], xs[1], hidY[j], T_IN[i]), fmt(net.w1[j][i]), wColor(net.w1[j][i]));
+      tag(...at(xs[1], hidY[j], xs[2], outY, 0.22), fmt(net.w2[j]), wColor(net.w2[j]));
+      tag(xs[1], hidY[j] + rSmall + 7, "b " + fmt(net.b1[j]), css("--muted"), "9px sans-serif");
+    }
+    tag(xs[2], outY + 26 + 9, "b " + fmt(net.b2), css("--muted"), "9px sans-serif");
+  }
+
+  ctx.fillStyle = css("--muted"); ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  ctx.fillText("входы", xs[0], 12); ctx.fillText(`скрытый слой (${nh})`, xs[1], 12); ctx.fillText("выход", xs[2], 12);
+  ctx.fillText("синий — положительный вес, красный — отрицательный, толщина — величина", w / 2, h - (showWeights ? 20 : 6));
+  if (showWeights) ctx.fillText("числа на линиях — веса, b — смещение (bias) нейрона", w / 2, h - 6);
+}
+
+// ---------- объёмный график поверхности z = f(x1, x2) ----------
+// Простейший 3D без библиотек: поворот вокруг вертикали (yaw), наклон (pitch),
+// ортогональная проекция и «алгоритм художника» — дальние грани рисуются первыми.
+const VIEW0 = { yaw: -0.65, pitch: 0.55 };
+let view = { ...VIEW0 };
+let surfMode = "both";
+try { surfMode = localStorage.getItem("surfMode") || "both"; } catch (e) {}
+
+function drawSurface(cv, mark) {
+  const [ctx, w, h] = setup(cv, ...dims(cv));
+  const n = S.grid.length, H = 0.75;  // H — высота «коробки» относительно стороны основания
+  const cy = Math.cos(view.yaw), sy = Math.sin(view.yaw), cp = Math.cos(view.pitch), sp = Math.sin(view.pitch);
+  const scale = Math.min(w, h) * 0.62, ox = w / 2, oy = h / 2 + 10;
+  // точка мира: u, v ∈ [−0.5, 0.5] (x1, x2), z ∈ [−H/2, H/2] (значение) → экран и глубина
+  const P = (u, v, z) => {
+    const x = u * cy - v * sy, y = u * sy + v * cy;
+    return [ox + scale * x, oy - scale * (z * cp + y * sp), y * cp - z * sp];
+  };
+  const U = i => (i + 0.5) / n - 0.5;                       // центр клетки сетки → координата
+  const Z = v => (Math.min(1.15, Math.max(-0.15, norm(v))) - 0.5) * H;
+  const floor = -H / 2;
+
+  // пол и задние стенки коробки
+  const box = [[-.5, -.5], [.5, -.5], [.5, .5], [-.5, .5]];
+  ctx.strokeStyle = css("--grid"); ctx.lineWidth = 1;
+  ctx.beginPath(); box.forEach(([u, v], k) => { const [x, y] = P(u, v, floor); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.closePath(); ctx.stroke();
+  for (let k = 1; k < 4; k++) {   // сетка на полу
+    const t = k / 4 - 0.5;
+    let [a, b] = [P(t, -.5, floor), P(t, .5, floor)]; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    [a, b] = [P(-.5, t, floor), P(.5, t, floor)]; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+  }
+  // вертикальное ребро в самом дальнем углу — ось z
+  const far = box.reduce((best, c) => P(c[0], c[1], 0)[2] > P(best[0], best[1], 0)[2] ? c : best);
+  { const [a, b] = [P(far[0], far[1], floor), P(far[0], far[1], H / 2)];
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); }
+
+  // грани поверхностей
+  const quads = [];
+  const add = (grid, kind) => {
+    for (let j = 0; j < n - 1; j++)
+      for (let i = 0; i < n - 1; i++) {
+        const vals = [grid[j][i], grid[j][i + 1], grid[j + 1][i + 1], grid[j + 1][i]];
+        const pts = [P(U(i), U(j), Z(vals[0])), P(U(i + 1), U(j), Z(vals[1])), P(U(i + 1), U(j + 1), Z(vals[2])), P(U(i), U(j + 1), Z(vals[3]))];
+        // освещение: нормаль грани в мировых координатах, свет сверху-слева
+        const du = 1 / n, dz1 = Z(vals[1]) - Z(vals[0]), dz2 = Z(vals[3]) - Z(vals[0]);
+        const nx = -dz1 * du, ny = -dz2 * du, nz = du * du, len = Math.hypot(nx, ny, nz);
+        const light = Math.max(0, (nx * -0.4 + ny * -0.3 + nz * 0.87) / len);
+        quads.push({ pts, kind, depth: pts.reduce((s, p) => s + p[2], 0) / 4,
+                     v: (vals[0] + vals[1] + vals[2] + vals[3]) / 4, light });
+      }
+  };
+  if (surfMode !== "net") add(S.true_grid, surfMode === "both" ? "wire" : "solid");
+  if (surfMode !== "true") add(S.grid, "solid");
+  quads.sort((a, b) => b.depth - a.depth);
+  const shade = (rgb, k) => rgb.replace(/\d+/g, c => Math.round(c * k));
+  for (const q of quads) {
+    ctx.beginPath(); q.pts.forEach(([x, y], k) => k ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.closePath();
+    if (q.kind === "solid") {
+      const col = shade(valueColorN(q.v), 0.55 + 0.45 * q.light);
+      ctx.fillStyle = col; ctx.fill();
+      ctx.strokeStyle = col; ctx.lineWidth = 0.6; ctx.stroke();   // закрыть щели между гранями
+    } else {
+      ctx.strokeStyle = css("--text"); ctx.globalAlpha = 0.35; ctx.lineWidth = 0.7; ctx.stroke(); ctx.globalAlpha = 1;
+    }
+  }
+
+  // текущая точка: ответ сети + вертикаль до пола
+  if (mark) {
+    const [x1, x2, y] = mark, u = normIn(x1) - 0.5, v = normIn(x2) - 0.5;
+    const top = P(u, v, Z(y)), bottom = P(u, v, floor);
+    ctx.setLineDash([4, 3]); ctx.strokeStyle = css("--text"); ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(bottom[0], bottom[1]); ctx.lineTo(top[0], top[1]); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = css("--text"); ctx.beginPath(); ctx.arc(bottom[0], bottom[1], 3, 0, 7); ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = "#000"; ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(top[0], top[1], 6, 0, 7); ctx.fill(); ctx.stroke();
+  }
+
+  // подписи осей
+  const num = v => (v < 0 ? "−" : "") + +Math.abs(v).toFixed(2);
+  ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillStyle = css("--muted");
+  const label = (u, v, z, text, dx = 0, dy = 0) => { const [x, y] = P(u, v, z); ctx.fillText(text, x + dx, y + dy); };
+  // оси x1 и x2 подписываем по ближним к зрителю рёбрам пола
+  const nearV = P(0, -.5, floor)[2] < P(0, .5, floor)[2] ? -.5 : .5;   // ребро вдоль x1
+  const nearU = P(-.5, 0, floor)[2] < P(.5, 0, floor)[2] ? -.5 : .5;   // ребро вдоль x2
+  const out = 0.09;
+  label(-.5, nearV + Math.sign(nearV) * out, floor, num(inputs[0])); label(.5, nearV + Math.sign(nearV) * out, floor, num(inputs[1]));
+  label(nearU + Math.sign(nearU) * out, -.5, floor, num(inputs[0])); label(nearU + Math.sign(nearU) * out, .5, floor, num(inputs[1]));
+  ctx.fillStyle = css("--text"); ctx.font = "bold 12px sans-serif";
+  label(0, nearV + Math.sign(nearV) * out * 1.8, floor, "x1"); label(nearU + Math.sign(nearU) * out * 1.8, 0, floor, "x2");
+  ctx.textAlign = "right"; ctx.font = "11px sans-serif"; ctx.fillStyle = css("--muted");
+  label(far[0], far[1], floor, num(range[0]), -6); label(far[0], far[1], H / 2, num(range[1]), -6);
+  ctx.fillStyle = css("--text"); ctx.font = "bold 12px sans-serif"; label(far[0], far[1], 0, "z", -8);
+  // легенда
+  ctx.textAlign = "left"; ctx.font = "11px sans-serif"; ctx.fillStyle = css("--muted");
+  ctx.fillText({ true: "показана функция " + S.formula, net: "показан ответ сети",
+                both: "сетка — функция " + S.formula + ", поверхность — ответ сети" }[surfMode], 8, 12);
+}
+
+function drawSurfaces() {
+  if (!S) return;
+  if (tab === "train") drawSurface($("surfTrain"));
+  else if (work) drawSurface($("surfWork"), [work.x1, work.x2, work.out.y]);
+}
+
+// вращение мышью / пальцем, колесо — наклон
+document.querySelectorAll("canvas.surf").forEach(cv => {
+  let drag = null;
+  cv.addEventListener("pointerdown", e => { drag = [e.clientX, e.clientY]; cv.setPointerCapture(e.pointerId); cv.classList.add("drag"); });
+  cv.addEventListener("pointermove", e => {
+    if (!drag) return;
+    view.yaw += (e.clientX - drag[0]) * 0.01;
+    view.pitch = Math.min(1.5, Math.max(0.05, view.pitch + (e.clientY - drag[1]) * 0.01));
+    drag = [e.clientX, e.clientY];
+    drawSurfaces();
+  });
+  const stop = () => { drag = null; cv.classList.remove("drag"); };
+  cv.addEventListener("pointerup", stop); cv.addEventListener("pointercancel", stop);
+  cv.addEventListener("wheel", e => {
+    e.preventDefault();
+    view.pitch = Math.min(1.5, Math.max(0.05, view.pitch + Math.sign(e.deltaY) * 0.05));
+    drawSurfaces();
+  }, { passive: false });
+});
+
+// ---------- график ошибки ----------
+function drawLoss() {
+  const cv = $("loss");
+  const [ctx, w, h] = setup(cv, cv.parentElement.clientWidth - 24, 460);
+  const L = 56, R = 16, T = 12, B = 34, lo = -6, hi = 0;
+  const X = e => L + e / maxEp * (w - L - R);
+  const Y = v => T + (hi - Math.min(hi, Math.max(lo, Math.log10(v)))) / (hi - lo) * (h - T - B);
+  const maxEp = Math.max(100, histTrain.length);
+  ctx.font = "11px sans-serif"; ctx.fillStyle = css("--muted");
+  for (let p = lo; p <= hi; p++) {
+    const y = Y(10 ** p);
+    ctx.strokeStyle = css("--grid"); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(w - R, y); ctx.stroke();
+    ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.fillText("1e" + p, L - 8, y);
+  }
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  for (let k = 0; k <= 4; k++) ctx.fillText(Math.round(maxEp * k / 4), X(maxEp * k / 4), h - B + 16);
+  ctx.fillText("эпоха", (L + w - R) / 2, h - 3);
+  ctx.strokeStyle = css("--border"); ctx.strokeRect(L, T, w - L - R, h - T - B);
+
+  const series = (hist, color) => {
+    if (hist.length < 2) return;
+    const step = Math.max(1, Math.floor(hist.length / 800));
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.beginPath();
+    for (let e = 0; e < hist.length; e += step) {
+      const v = isFinite(hist[e]) && hist[e] > 0 ? hist[e] : 1;
+      e === 0 ? ctx.moveTo(X(e + 1), Y(v)) : ctx.lineTo(X(e + 1), Y(v));
+    }
+    ctx.stroke();
+  };
+  series(histTrain, css("--train"));
+  series(histTest, css("--test"));
+
+  ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.font = "12px sans-serif";
+  [["обучающие данные", css("--train")], ["проверочные данные", css("--test")]].forEach(([t, c], k) => {
+    const y = T + 16 + k * 18;
+    ctx.fillStyle = c; ctx.fillRect(w - R - 170, y - 2, 18, 4);
+    ctx.fillStyle = css("--text"); ctx.fillText(t, w - R - 146, y);
+  });
+}
+
+// ---------- обновление ----------
+const target = (i, j) => S.true_grid[j][i];
+
+function renderTrain() {
+  const errScale = 0.05 * (range[1] - range[0]);
+  $("errScale").textContent = +errScale.toFixed(2);
+  drawNetwork($("netTrain"), S);
+  drawLoss();
+  drawMap($("mapTrue"), target, valueColorN);
+  drawMap($("mapNet"), (i, j) => S.grid[j][i], valueColorN);
+  drawMap($("mapErr"), (i, j) => S.grid[j][i] - target(i, j), e => errorColor(e, errScale));
+  drawSurface($("surfTrain"));
+}
+
+let work = null;    // последний расчёт: {x1, x2, out} — out содержит и веса, по которым он сделан
+let anim = null;    // время старта анимации прохода сигнала
+let animTimer = null;
+
+async function renderWork() {
+  const x1 = +$("x1").value, x2 = +$("x2").value;
+  $("x1Val").textContent = x1.toFixed(2); $("x2Val").textContent = x2.toFixed(2);
+  const out = await (await fetch(`/api/predict?x1=${x1}&x2=${x2}`)).json();
+  work = { x1, x2, out };
+  const err = Math.abs(out.y - out.target);
+  $("resNet").textContent = out.y.toFixed(4);
+  $("resTrue").textContent = out.target.toFixed(4);
+  $("resErr").textContent = err.toFixed(4);
+  $("resErr").style.color = err > 0.02 * (range[1] - range[0]) ? css("--neg") : css("--ok");
+  $("workHint").textContent = S.loaded ? `Веса загружены из файла ${S.file}.`
+    : S.epoch === 0 ? "Сеть ещё не обучена — запустите обучение на вкладке «Обучение»."
+    : `Сеть обучена: ${S.epoch} эпох.`;
+  $("zFormula").textContent = S.r2 ? "z = w₁·x1 + w₂·x2 + w₃·r² + b" : "z = w₁·x1 + w₂·x2 + b";
+  $("r2Val").hidden = !S.r2;
+  $("r2Val").textContent = `Третий вход (подсказка): r² = x1² + x2² = ${(x1 * x1 + x2 * x2).toFixed(3)}`;
+  renderCalc();
+  if (!anim) drawNetwork($("netWork"), out, [x1, x2], out);
+  drawMap($("mapWork"), (i, j) => S.grid[j][i], valueColorN, [x1, x2]);
+  drawSurface($("surfWork"), [x1, x2, out.y]);
+}
+
+// ---------- таблица расчёта ----------
+function renderCalc() {
+  const { x1, x2, out } = work;
+  const f = (v, d = 3) => (v < 0 ? "−" : "") + Math.abs(v).toFixed(d);
+  const sg = v => v >= 0 ? "pos" : "neg";
+  const cell = (cls, v, how, d) => `<td class="${cls}"><span class="${sg(v)}">${f(v, d)}</span>${how ? `<small>${how}</small>` : ""}</td>`;
+  const hint = out.w1[0].length === 3, r2 = x1 * x1 + x2 * x2;   // подсказка r² — третий вход
+  let rows = "", sum = 0;
+  out.w2.forEach((wo, j) => {
+    const [wa, wb, wc = 0] = out.w1[j], b = out.b1[j];
+    const z = wa * x1 + wb * x2 + (hint ? wc * r2 : 0) + b, h = 1 / (1 + Math.exp(-z)), c = h * wo;
+    sum += c;
+    rows += `<tr><td>h${j + 1}</td>` +
+      cell("c-in", wa * x1, `${f(wa)} × ${x1.toFixed(2)}`) +
+      cell("c-in", wb * x2, `${f(wb)} × ${x2.toFixed(2)}`) +
+      (hint ? cell("c-in", wc * r2, `${f(wc)} × ${r2.toFixed(3)}`) : "") +
+      cell("c-in", b, "") +
+      cell("c-in", z, "сумма") +
+      cell("c-act", h, `σ(${f(z, 2)})`) +
+      cell("c-out", wo, "") +
+      cell("c-out", c, `${h.toFixed(3)} × ${f(wo)}`) + "</tr>";
+  });
+  const y = sum + out.b2;
+  const foot = (label, v, cls = "") => `<tr class="${cls}"><td class="c-sum" colspan="${hint ? 8 : 7}" style="text-align:right">${label}</td>` +
+    `<td class="c-sum"><span class="${sg(v)}">${f(v, 4)}</span></td></tr>`;
+  $("calc").innerHTML =
+    `<thead><tr><th>Нейрон</th><th class="c-in">w₁·x1</th><th class="c-in">w₂·x2</th>` +
+    (hint ? `<th class="c-in">w₃·r²</th>` : "") + `<th class="c-in">b</th>` +
+    `<th class="c-in">z = сумма</th><th class="c-act">h = σ(z)</th><th class="c-out">w<sub>вых</sub></th>` +
+    `<th class="c-out">вклад h·w<sub>вых</sub></th></tr></thead><tbody>${rows}</tbody><tfoot>` +
+    foot("Σ вкладов всех скрытых нейронов", sum) +
+    foot("+ смещение выхода b<sub>вых</sub>", out.b2) +
+    foot("= ответ сети y", y, "total") +
+    foot(`правильный ответ ${S.formula}`, out.target) +
+    foot("ошибка y − правильный", y - out.target) + "</tfoot>";
+}
+
+// ---------- анимация прохода сигнала ----------
+const STAGE_COLS = ["in", "in", "act", "out", "sum"];
+function startAnim() {
+  if (!work) return;
+  anim = performance.now();
+  requestAnimationFrame(animFrame);
+}
+function animFrame() {
+  if (anim == null || tab !== "work") { anim = null; $("calc").dataset.stage = ""; return; }
+  // время берём сами: метка, которую передаёт requestAnimationFrame, может быть меньше момента старта
+  const p = Math.min(1, Math.max(0, (performance.now() - anim) / ANIM_MS));
+  const [phase] = phaseOf(p);
+  $("calc").dataset.stage = p < 1 ? STAGE_COLS[phase] : "";
+  drawNetwork($("netWork"), work.out, [work.x1, work.x2], work.out, p < 1 ? p : null);
+  if (p < 1) requestAnimationFrame(animFrame); else anim = null;
+}
+// при движении ползунка — без анимации, а через 0.35 с после остановки — проход сигнала
+function inputsChanged() {
+  anim = null; $("calc").dataset.stage = "";
+  clearTimeout(animTimer);
+  renderWork().then(() => {
+    if ($("autoAnim").checked) animTimer = setTimeout(startAnim, 350);
+  });
+}
+
+function render() {
+  if (!S) return;
+  range = S.range;
+  if (inputs[0] !== S.inputs[0] || inputs[1] !== S.inputs[1]) {  // сменился диапазон входов — подстроить ползунки
+    inputs = S.inputs;
+    for (const id of ["x1", "x2"]) { $(id).min = inputs[0]; $(id).max = inputs[1]; }
+  }
+  // список функций: на −1..+1 степень недоступна, формулы у деления и XOR другие
+  const opts = S.funcs.map(o => `<option value="${o.key}"${o.available ? "" : " disabled"}>${o.name}` +
+    (o.available ? `: ${o.formula}` : " — не определена для этих входов") + "</option>").join("");
+  if ($("func").dataset.opts !== opts) { $("func").innerHTML = opts; $("func").dataset.opts = opts; }
+  if (!$("domain").options.length)
+    $("domain").innerHTML = S.domains.map(o => `<option value="${o.key}">${o.name}</option>`).join("");
+  if (document.activeElement !== $("func")) $("func").value = S.func;
+  if (document.activeElement !== $("domain")) $("domain").value = S.domain;
+  $("title").textContent = `Нейронная сеть: ${S.formula}`;
+  document.querySelectorAll(".formulaName").forEach(e => e.textContent = S.formula);
+  const neg = S.domain === "pm1";
+  if (document.activeElement !== $("r2")) $("r2").checked = S.r2;
+  $("funcHint").textContent = {
+    xor: (neg ? "1, если у чисел разные знаки. " : "") + "XOR-ступенька — трудная задача для 8 нейронов: резкие края плохо описываются плавными сигмоидами. " +
+         "Поставьте скорость обучения 0.05–0.1 и дайте сети несколько тысяч эпох — ошибка будет медленно снижаться.",
+    add: `Сумма бывает от ${range[0]} до ${range[1]}, поэтому цветовая шкала карт растянута на этот диапазон.`,
+    div: neg ? "Обычное x1 / x2 при x2 → 0 уходит в бесконечность, а x1 / (1 + x2) — при x2 → −1, поэтому делим на (2 + x2)."
+             : "Обычное x1 / x2 при x2 → 0 уходит в бесконечность, поэтому делим на (1 + x2).",
+    hat: "«Сомбреро»: r — расстояние до точки (0, 0). Горка в центре и круговые волны вокруг." +
+         (S.r2 ? " С подсказкой r² ошибка примерно в 70 раз меньше." : " Подсказка r² уменьшает ошибку примерно в 70 раз.") +
+         (neg ? "" : " На входах 0..1 видна только четверть картины — переключите на −1..+1."),
+    egg: "«Яичная коробка»: холмы и впадины в шахматном порядке. Посмотрите, как 8 нейронов делят их между собой." +
+         (neg ? "" : " На входах 0..1 холмов меньше — на −1..+1 интереснее."),
+    ring: (S.r2
+      ? "«Кольцо» радиуса 0.6 с подсказкой r²: сети больше не нужно собирать окружность из прямых — " +
+        "достаточно выучить «горку» по одному числу r², ошибка падает до ~0.002."
+      : "«Кольцо» радиуса 0.6. Пример предела: 8 плавных «ступенек»-сигмоид плохо собираются в замкнутую кривую, " +
+        "сеть почти не учится (ошибка застревает около 0.07). Включите подсказку r² — и сравните.") +
+      (neg ? "" : " На входах 0..1 видна только четверть кольца."),
+    exp: "e ^ x2 зависит только от x2. Сеть должна сама понять, что x1 не важен: " +
+         "посмотрите в таблице расчёта — вклад от x1 у нейронов станет маленьким или будет взаимно гаситься.",
+    absdiff: "|x1 − x2| — «гладкий XOR»: 0, когда числа равны, и больше, чем сильнее они различаются.",
+    pow: "x1 в степени x2. Считается, что 0⁰ = 1. У оси x1 = 0 функция резко прыгает (0.01^0.5 = 0.1, а 0^0 = 1) — " +
+         "там сеть ошибается сильнее всего, на остальной области ошибка маленькая.",
+  }[S.func] || "";
+  $("status").textContent = `Эпоха: ${S.epoch}   MSE на проверке: ${histTest.length ? histTest[histTest.length - 1].toFixed(6) : "—"}`;
+  $("message").textContent = S.message;
+  $("startBtn").textContent = S.running ? "⏸ Пауза" : "▶ Старт";
+  tab === "train" ? renderTrain() : renderWork();
+}
+
+async function poll() {
+  try {
+    const st = await (await fetch(`/api/state?since=${histTrain.length}`)).json();
+    if (st.epoch < histTrain.length) { histTrain = []; histTest = []; }  // был сброс
+    else { histTrain.push(...st.train); histTest.push(...st.test); }
+    if (!synced) {  // при первом подключении взять настройки с сервера
+      synced = true;
+      $("lr").value = st.lr; $("lrVal").textContent = st.lr.toFixed(2);
+      $("speed").value = st.speed; $("speedVal").textContent = st.speed;
+    }
+    const changed = !S || st.epoch !== S.epoch || st.running !== S.running || st.message !== S.message || st.loaded !== S.loaded || st.func !== S.func || st.domain !== S.domain || st.r2 !== S.r2;
+    S = st;
+    if (changed) render();
+  } catch (e) {
+    $("status").textContent = "Нет связи с сервером — запустите python3 web_app.py";
+  }
+  setTimeout(poll, 60);
+}
+
+async function control(body) {
+  await fetch("/api/control", { method: "POST", body: JSON.stringify(body) });
+  S = null;  // принудительно перерисовать при следующем опросе
+}
+
+// ---------- обработчики ----------
+$("startBtn").onclick = () => control({ action: S && S.running ? "pause" : "start",
+                                        lr: +$("lr").value, speed: +$("speed").value });
+document.querySelectorAll("[data-action]").forEach(b => b.onclick = () => control({ action: b.dataset.action }));
+$("lr").oninput = () => { $("lrVal").textContent = (+$("lr").value).toFixed(2); control({ lr: +$("lr").value }); };
+$("speed").oninput = () => { $("speedVal").textContent = $("speed").value; control({ speed: +$("speed").value }); };
+$("func").onchange = () => { histTrain = []; histTest = []; control({ action: "func", func: $("func").value }); };
+$("r2").onchange = () => { histTrain = []; histTest = []; control({ action: "r2", on: $("r2").checked }); };
+$("domain").onchange = () => { histTrain = []; histTest = []; control({ action: "domain", domain: $("domain").value }); };
+$("x1").oninput = $("x2").oninput = () => S && inputsChanged();
+$("randomBtn").onclick = () => {
+  const rnd = () => (inputs[0] + Math.random() * (inputs[1] - inputs[0])).toFixed(2);
+  $("x1").value = rnd(); $("x2").value = rnd(); S && inputsChanged();
+};
+$("animBtn").onclick = () => S && renderWork().then(startAnim);
+document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
+  tab = b.dataset.tab;
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t === b));
+  $("tab-train").hidden = tab !== "train"; $("tab-work").hidden = tab !== "work";
+  render();
+});
+document.querySelectorAll(".showW").forEach(cb => {
+  cb.checked = showWeights;
+  cb.onchange = () => {
+    showWeights = cb.checked;
+    document.querySelectorAll(".showW").forEach(o => o.checked = showWeights);
+    try { localStorage.setItem("showWeights", showWeights ? "1" : "0"); } catch (e) {}
+    render();
+  };
+});
+document.querySelectorAll(".surfMode").forEach(sel => {
+  sel.value = surfMode;
+  sel.onchange = () => {
+    surfMode = sel.value;
+    document.querySelectorAll(".surfMode").forEach(o => o.value = surfMode);
+    try { localStorage.setItem("surfMode", surfMode); } catch (e) {}
+    drawSurfaces();
+  };
+});
+document.querySelectorAll(".surfReset").forEach(b => b.onclick = () => { view = { ...VIEW0 }; drawSurfaces(); });
+window.addEventListener("resize", render);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+
+if (location.hash === "#work") document.querySelector('[data-tab="work"]').click();
+poll();
+</script>
+</body>
+</html>
