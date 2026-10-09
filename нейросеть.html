@@ -210,7 +210,8 @@ const ENGINE = (() => {
 
   // ---------- функции и диапазоны входов ----------
   const DOMAINS = { "01": ["0..1", 0, 1], pm1: ["−1..+1", -1, 1] };
-  const DEFAULT_FUNC = "mul", DEFAULT_DOMAIN = "01";
+  const DEFAULT_FUNC = "mul", DEFAULT_DOMAIN = "01";   // DEFAULT_DOMAIN — для имён файлов и старых файлов весов
+  const START_DOMAIN = "pm1";                          // с чего начинает страница: на −1..+1 функции интереснее
   const both = v => ({ "01": v, pm1: v });
   const sombrero = r => r < 1e-9 ? 1 : Math.sin(5 * r) / (5 * r);
   // ключ: [название, {диапазон: [формула, функция]}]; нет диапазона — функция там не определена
@@ -321,7 +322,7 @@ const ENGINE = (() => {
   }
 
   // ---------- «тренер»: то, что делал web_app.py ----------
-  const T = { func: DEFAULT_FUNC, domain: DEFAULT_DOMAIN, r2: false, lr: 0.3, speed: 2,
+  const T = { func: DEFAULT_FUNC, domain: START_DOMAIN, r2: false, lr: 0.3, speed: 2,
               running: false, message: "", source: "" };
 
   function gridPoints() {

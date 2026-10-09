@@ -14,7 +14,7 @@ import webbrowser
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-from network import (DEFAULT_DOMAIN, DEFAULT_FUNC, DOMAINS, FUNCTIONS, NeuralNetwork, formula, has_domain,
+from network import (DEFAULT_FUNC, DOMAINS, START_DOMAIN, FUNCTIONS, NeuralNetwork, formula, has_domain,
                      make_dataset, target_function, value_range, weights_file)
 
 HOST, PORT = "127.0.0.1", 8765
@@ -31,7 +31,7 @@ class Trainer:
     def __init__(self):
         self.lock = threading.Lock()
         self.func = DEFAULT_FUNC
-        self.domain = DEFAULT_DOMAIN
+        self.domain = START_DOMAIN
         self.r2 = False         # подсказка: третий вход r² = x1² + x2²
         self.lr = 0.3
         self.speed = 2          # эпох за шаг
