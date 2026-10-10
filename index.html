@@ -49,7 +49,9 @@
   .slider b { font-variant-numeric: tabular-nums; }
   .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
   select.btn { padding: 6px 10px; }
-  #funcHint { color: var(--muted); font-size: 12px; margin: -4px 0 10px; }
+  #funcHint, #actHint { color: var(--muted); font-size: 12px; margin: -4px 0 10px; }
+  #actHint button { font-size: 12px; padding: 1px 8px; margin-left: 6px; }
+  #actPlot { border: 1px solid var(--border); border-radius: 6px; background: var(--panel); }
   /* таблица расчёта */
   .calc-wrap { overflow-x: auto; }
   .formula { color: var(--muted); margin: 0 0 8px; font-size: 13px; }
@@ -91,6 +93,9 @@
     <div class="controls">
       <label class="range">входы <select class="btn" id="domain"></select></label>
       <label class="range">функция <select class="btn" id="func"></select></label>
+      <label class="range" title="функция активации скрытых нейронов; при смене сеть сбрасывается">активация
+        <select class="btn" id="act"></select></label>
+      <canvas id="actPlot" width="120" height="40" title="график функции активации f(z), z от −4 до 4"></canvas>
       <button class="btn primary" id="startBtn">▶ Старт</button>
       <button class="btn" data-action="reset">↺ Сброс</button>
       <button class="btn" data-action="save" title="скачать файл .json и запомнить в браузере">Сохранить веса</button>
@@ -107,6 +112,7 @@
         <input type="checkbox" id="r2"> подсказка: третий вход r² = x1² + x2²</label>
     </div>
     <div id="funcHint"></div>
+    <div id="actHint"></div>
     <div class="row">
       <div class="panel"><h2>Схема сети</h2><canvas id="netTrain" width="560" height="460"></canvas></div>
       <div class="panel grow"><h2>Ошибка (MSE) по эпохам, логарифмическая шкала</h2><canvas id="loss" height="460"></canvas></div>
@@ -172,7 +178,7 @@
     </div>
     <div class="panel">
       <h2>Расчёт по нейронной сети для текущих x1, x2</h2>
-      <p class="formula">Каждый скрытый нейрон: <code id="zFormula">z = w₁·x1 + w₂·x2 + b</code>, затем <code>h = σ(z) = 1 / (1 + e<sup>−z</sup>)</code>.
+      <p class="formula">Каждый скрытый нейрон: <code id="zFormula">z = w₁·x1 + w₂·x2 + b</code>, затем <code id="hFormula">h = σ(z) = 1 / (1 + e^(−z))</code>.
         Выход: <code>y = Σ h·w<sub>вых</sub> + b<sub>вых</sub></code>. Под каждым числом — как оно получено.</p>
       <div class="calc-wrap"><table class="calc" id="calc"></table></div>
     </div>
@@ -197,6 +203,23 @@ const ENGINE = (() => {
     if (x > 60) return 1;
     return 1 / (1 + Math.exp(-x));
   }
+
+  // Функции активации скрытого слоя.
+  // f(z) — сама функция; grad(g, z, h) — ошибка g, прошедшая через нейрон: g · f′(z) (h = f(z) уже посчитано);
+  // range — диапазон значений для цвета нейрона (null — без границы).
+  const ACTS = {
+    sigmoid: { name: "сигмоида", sym: "σ", formula: "σ(z) = 1 / (1 + e^(−z))", range: [0, 1],
+               f: sigmoid, grad: (g, z, h) => g * h * (1 - h) },
+    tanh:    { name: "tanh", sym: "tanh", formula: "tanh(z) = (e^z − e^(−z)) / (e^z + e^(−z))", range: [-1, 1],
+               f: Math.tanh, grad: (g, z, h) => g * (1 - h * h) },
+    relu:    { name: "ReLU", sym: "ReLU", formula: "ReLU(z) = max(0, z)", range: [0, null],
+               f: z => z > 0 ? z : 0, grad: (g, z) => z > 0 ? g : 0 },
+    leaky:   { name: "Leaky ReLU", sym: "LReLU", formula: "LReLU(z) = max(0.01·z, z)", range: [null, null],
+               f: z => z > 0 ? z : 0.01 * z, grad: (g, z) => z > 0 ? g : 0.01 * g },
+    gauss:   { name: "гауссиана", sym: "G", formula: "G(z) = e^(−z²)", range: [0, 1],
+               f: z => Math.exp(-z * z), grad: (g, z, h) => g * -2 * z * h },
+  };
+  const DEFAULT_ACT = "sigmoid";
 
   // Генератор случайных чисел с зерном (mulberry32): одинаковое зерно — одинаковые данные
   function seeded(seed) {
@@ -246,9 +269,10 @@ const ENGINE = (() => {
   }
 
   // Имя файла весов — как у Python-версии, файлы взаимозаменяемы
-  function weightsFile(f, d, r2) {
-    if (f === DEFAULT_FUNC && d === DEFAULT_DOMAIN && !r2) return "weights.json";
-    return `weights_${f}` + (d === DEFAULT_DOMAIN ? "" : `_${d}`) + (r2 ? "_r2" : "") + ".json";
+  function weightsFile(f, d, r2, act = DEFAULT_ACT) {
+    if (f === DEFAULT_FUNC && d === DEFAULT_DOMAIN && !r2 && act === DEFAULT_ACT) return "weights.json";
+    return `weights_${f}` + (d === DEFAULT_DOMAIN ? "" : `_${d}`) + (r2 ? "_r2" : "")
+      + (act === DEFAULT_ACT ? "" : `_${act}`) + ".json";
   }
 
   function makeDataset(n, seed, f, d) {
@@ -260,10 +284,11 @@ const ENGINE = (() => {
     return data;
   }
 
-  // ---------- сама сеть: входы (+ подсказка r²) -> скрытый слой (sigmoid) -> 1 линейный выход ----------
+  // ---------- сама сеть: входы (+ подсказка r²) -> скрытый слой (активация act) -> 1 линейный выход ----------
   class Net {
-    constructor(nHidden = HIDDEN, rnd = Math.random, r2 = false) {
+    constructor(nHidden = HIDDEN, rnd = Math.random, r2 = false, act = DEFAULT_ACT) {
       this.r2 = r2;
+      this.act = act;
       const nIn = r2 ? 3 : 2;
       const lim1 = Math.sqrt(6 / (nIn + nHidden)), lim2 = Math.sqrt(6 / (nHidden + 1));  // Ксавье
       const u = lim => (rnd() * 2 - 1) * lim;
@@ -273,23 +298,27 @@ const ENGINE = (() => {
       this.b2 = 0;
     }
     features(x) { return this.r2 ? [x[0], x[1], x[0] * x[0] + x[1] * x[1]] : x; }
+    // возвращает [выход, активации скрытого слоя h, их суммы z]
     _forward(x) {
+      const f = ACTS[this.act].f, zs = [];
       const h = this.w1.map((row, j) => {
         let z = 0;
         for (let i = 0; i < row.length; i++) z += row[i] * x[i];
-        return sigmoid(z + this.b1[j]);
+        z += this.b1[j];
+        zs.push(z);
+        return f(z);
       });
       let y = 0;
       for (let j = 0; j < h.length; j++) y += this.w2[j] * h[j];
-      return [y + this.b2, h];
+      return [y + this.b2, h, zs];
     }
     forward(x) { return this._forward(this.features(x)); }
     predict(x1, x2) { return this.forward([x1, x2])[0]; }
     trainStep(x, t, lr) {
       x = this.features(x);
-      const [y, h] = this._forward(x), err = y - t;
+      const [y, h, z] = this._forward(x), err = y - t, grad = ACTS[this.act].grad;
       for (let j = 0; j < this.w2.length; j++) {
-        const dh = err * this.w2[j] * h[j] * (1 - h[j]);   // считаем ДО изменения w2[j]
+        const dh = grad(err * this.w2[j], z[j], h[j]);   // считаем ДО изменения w2[j]
         this.w2[j] -= lr * err * h[j];
         for (let i = 0; i < x.length; i++) this.w1[j][i] -= lr * dh * x[i];
         this.b1[j] -= lr * dh;
@@ -313,17 +342,17 @@ const ENGINE = (() => {
       return s / data.length;
     }
     toJSON(func, domain) {
-      return { func, domain, r2: this.r2, w1: this.w1, b1: this.b1, w2: this.w2, b2: this.b2 };
+      return { func, domain, r2: this.r2, act: this.act, w1: this.w1, b1: this.b1, w2: this.w2, b2: this.b2 };
     }
     static fromJSON(d) {
-      const net = new Net(d.w1.length, Math.random, !!d.r2);
+      const net = new Net(d.w1.length, Math.random, !!d.r2, d.act || DEFAULT_ACT);   // старые файлы — сигмоида
       net.w1 = d.w1.map(r => r.slice()); net.b1 = d.b1.slice(); net.w2 = d.w2.slice(); net.b2 = d.b2;
       return net;
     }
   }
 
   // ---------- «тренер»: то, что делал web_app.py ----------
-  const T = { func: DEFAULT_FUNC, domain: START_DOMAIN, r2: false, lr: 0.3, speed: 2,
+  const T = { func: DEFAULT_FUNC, domain: START_DOMAIN, r2: false, act: DEFAULT_ACT, lr: 0.3, speed: 2,
               running: false, message: "", source: "" };
 
   function gridPoints() {
@@ -337,7 +366,7 @@ const ENGINE = (() => {
     T.range = valueRange(T.func, T.domain);
     const pts = gridPoints();
     T.trueGrid = pts.map(b => pts.map(a => target(a, b, T.func, T.domain)));
-    T.net = new Net(HIDDEN, Math.random, T.r2);
+    T.net = new Net(HIDDEN, Math.random, T.r2, T.act);
     T.rnd = Math.random;
     T.epoch = 0; T.histTrain = []; T.histTest = [];
     T.loaded = false; T.source = "";
@@ -362,8 +391,9 @@ const ENGINE = (() => {
     const pts = gridPoints(), net = T.net, [, lo, hi] = DOMAINS[T.domain];
     return {
       func: T.func, domain: T.domain, inputs: [lo, hi], range: T.range,
-      formula: formula(T.func, T.domain), file: weightsFile(T.func, T.domain, net.r2), source: T.source,
-      r2: net.r2,
+      formula: formula(T.func, T.domain), file: weightsFile(T.func, T.domain, net.r2, net.act), source: T.source,
+      r2: net.r2, act: net.act,
+      acts: Object.entries(ACTS).map(([key, a]) => ({ key, name: a.name, formula: a.formula })),
       domains: Object.entries(DOMAINS).map(([key, d]) => ({ key, name: d[0] })),
       funcs: Object.entries(FUNCTIONS).map(([key, f]) => ({ key, name: f[0], available: hasDomain(key, T.domain),
                                                             formula: hasDomain(key, T.domain) ? formula(key, T.domain) : "" })),
@@ -376,7 +406,7 @@ const ENGINE = (() => {
 
   function predict(x1, x2) {
     const net = T.net, [y, hidden] = net.forward([x1, x2]);
-    return { y, hidden, target: target(x1, x2, T.func, T.domain),
+    return { y, hidden, act: net.act, target: target(x1, x2, T.func, T.domain),
              w1: net.w1.map(r => r.slice()), b1: net.b1.slice(), w2: net.w2.slice(), b2: net.b2 };
   }
 
@@ -399,8 +429,9 @@ const ENGINE = (() => {
     if (!d || !Array.isArray(d.w1) || !Array.isArray(d.w2)) throw new Error("это не файл весов");
     const func = d.func || DEFAULT_FUNC, domain = d.domain || DEFAULT_DOMAIN;   // старые файлы — умножение на 0..1
     if (!(func in FUNCTIONS) || !(domain in DOMAINS) || !hasDomain(func, domain)) throw new Error("неизвестная функция или диапазон");
+    if (d.act && !(d.act in ACTS)) throw new Error(`неизвестная функция активации «${d.act}»`);
     T.running = false;
-    T.func = func; T.domain = domain; T.r2 = !!d.r2;
+    T.func = func; T.domain = domain; T.r2 = !!d.r2; T.act = d.act || DEFAULT_ACT;
     reset();
     T.net = Net.fromJSON(d);
     T.loaded = true; T.source = source;
@@ -416,6 +447,8 @@ const ENGINE = (() => {
       T.running = false; T.func = cmd.func; reset();
     } else if (action === "r2") {
       T.running = false; T.r2 = !!cmd.on; reset();
+    } else if (action === "act" && cmd.act in ACTS) {
+      T.running = false; T.act = cmd.act; reset();
     } else if (action === "domain" && cmd.domain in DOMAINS) {
       T.running = false; T.domain = cmd.domain;
       if (!hasDomain(T.func, T.domain)) {
@@ -430,12 +463,12 @@ const ENGINE = (() => {
     } else if (action === "reset") {
       T.running = false; reset();
     } else if (action === "save") {
-      const name = weightsFile(T.func, T.domain, T.net.r2), obj = T.net.toJSON(T.func, T.domain);
+      const name = weightsFile(T.func, T.domain, T.net.r2, T.net.act), obj = T.net.toJSON(T.func, T.domain);
       store.set(LS(name), obj);
       download(name, obj);
       T.message = `Веса скачаны в файл ${name} и запомнены в браузере`;
     } else if (action === "load") {
-      const name = weightsFile(T.func, T.domain, T.r2), obj = store.get(LS(name));
+      const name = weightsFile(T.func, T.domain, T.r2, T.act), obj = store.get(LS(name));
       if (!obj) T.message = `В браузере нет сохранённых весов ${name} — сначала нажмите «Сохранить» или откройте файл`;
       else loadObject(obj, `${name} (из памяти браузера)`);
     } else if (action === "preset") {
@@ -462,7 +495,7 @@ const ENGINE = (() => {
     } catch (e) { reset(); }
   }
 
-  return { state, predict, control, Net, target, weightsFile };
+  return { state, predict, control, Net, target, weightsFile, ACTS };
 })();
 </script>
 <script>
@@ -597,6 +630,13 @@ function drawNetwork(cv, net, input, out, p = null) {
     }
   };
   const rSmall = Math.min(15, (h - 50) / nh / 2 - 2);
+  // активация скрытого нейрона → 0..1 для цвета: у tanh диапазон −1..1, у ReLU — от 0 до максимума в слое
+  const act = ENGINE.ACTS[net.act || "sigmoid"];
+  const hMax = out ? Math.max(1e-9, ...out.hidden.map(Math.abs)) : 1;
+  const hidColor = v => {
+    const [lo, hi] = act.range;
+    return lo != null && hi != null ? (v - lo) / (hi - lo) : Math.max(0, v / hMax);
+  };
   // Бегущие точки сигнала: размер — величина вклада |вес × значение|, цвет — знак
   const dot = (x0, y0, x1, y1, tt, v) => {
     const r = 2.5 + Math.min(6, Math.abs(v) * 5);
@@ -625,7 +665,7 @@ function drawNetwork(cv, net, input, out, p = null) {
     ctx.fillStyle = css("--muted"); ctx.font = "10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
     ctx.fillText(input ? "r² (подсказка)" : "подсказка", xs[0], inY[2] + 38);
   }
-  for (let j = 0; j < nh; j++) node(xs[1], hidY[j], rSmall, out ? out.hidden[j] : null, out && rSmall >= 14 ? out.hidden[j].toFixed(2) : "", hiddenK);
+  for (let j = 0; j < nh; j++) node(xs[1], hidY[j], rSmall, out ? hidColor(out.hidden[j]) : null, out && rSmall >= 14 ? out.hidden[j].toFixed(2) : "", hiddenK);
   node(xs[2], outY, 26, out ? norm(out.y) : null, out ? out.y.toFixed(3) : "y", out ? outK : 1);
 
   if (showWeights) {
@@ -650,7 +690,7 @@ function drawNetwork(cv, net, input, out, p = null) {
   }
 
   ctx.fillStyle = css("--muted"); ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
-  ctx.fillText("входы", xs[0], 12); ctx.fillText(`скрытый слой (${nh})`, xs[1], 12); ctx.fillText("выход", xs[2], 12);
+  ctx.fillText("входы", xs[0], 12); ctx.fillText(`скрытый слой (${nh}, ${act.name})`, xs[1], 12); ctx.fillText("выход", xs[2], 12);
   ctx.fillText("синий — положительный вес, красный — отрицательный, толщина — величина", w / 2, h - (showWeights ? 20 : 6));
   if (showWeights) ctx.fillText("числа на линиях — веса, b — смещение (bias) нейрона", w / 2, h - 6);
 }
@@ -867,10 +907,11 @@ function renderCalc() {
   const sg = v => v >= 0 ? "pos" : "neg";
   const cell = (cls, v, how, d) => `<td class="${cls}"><span class="${sg(v)}">${f(v, d)}</span>${how ? `<small>${how}</small>` : ""}</td>`;
   const hint = out.w1[0].length === 3, r2 = x1 * x1 + x2 * x2;   // подсказка r² — третий вход
+  const act = ENGINE.ACTS[out.act];
   let rows = "", sum = 0;
   out.w2.forEach((wo, j) => {
     const [wa, wb, wc = 0] = out.w1[j], b = out.b1[j];
-    const z = wa * x1 + wb * x2 + (hint ? wc * r2 : 0) + b, h = 1 / (1 + Math.exp(-z)), c = h * wo;
+    const z = wa * x1 + wb * x2 + (hint ? wc * r2 : 0) + b, h = act.f(z), c = h * wo;
     sum += c;
     rows += `<tr><td>h${j + 1}</td>` +
       cell("c-in", wa * x1, `${f(wa)} × ${x1.toFixed(2)}`) +
@@ -878,7 +919,7 @@ function renderCalc() {
       (hint ? cell("c-in", wc * r2, `${f(wc)} × ${r2.toFixed(3)}`) : "") +
       cell("c-in", b, "") +
       cell("c-in", z, "сумма") +
-      cell("c-act", h, `σ(${f(z, 2)})`) +
+      cell("c-act", h, `${act.sym}(${f(z, 2)})`) +
       cell("c-out", wo, "") +
       cell("c-out", c, `${h.toFixed(3)} × ${f(wo)}`) + "</tr>";
   });
@@ -888,7 +929,7 @@ function renderCalc() {
   $("calc").innerHTML =
     `<thead><tr><th>Нейрон</th><th class="c-in">w₁·x1</th><th class="c-in">w₂·x2</th>` +
     (hint ? `<th class="c-in">w₃·r²</th>` : "") + `<th class="c-in">b</th>` +
-    `<th class="c-in">z = сумма</th><th class="c-act">h = σ(z)</th><th class="c-out">w<sub>вых</sub></th>` +
+    `<th class="c-in">z = сумма</th><th class="c-act">h = ${act.sym}(z)</th><th class="c-out">w<sub>вых</sub></th>` +
     `<th class="c-out">вклад h·w<sub>вых</sub></th></tr></thead><tbody>${rows}</tbody><tfoot>` +
     foot("Σ вкладов всех скрытых нейронов", sum) +
     foot("+ смещение выхода b<sub>вых</sub>", out.b2) +
@@ -922,6 +963,29 @@ function inputsChanged() {
   });
 }
 
+// Описание активаций и скорость обучения, лучшая в опытах (1500 эпох, входы −1..+1)
+const ACT_HINTS = {
+  sigmoid: ["плавная «ступенька» от 0 до 1, классика нейросетей.", 0.3],
+  tanh: ["та же «ступенька», но от −1 до 1 — вокруг нуля; обычно учится чуть лучше сигмоиды.", 0.1],
+  relu: ["«излом»: 0 при z < 0, иначе z. Ответ сети собирается из плоских граней — посмотрите на 3D-график. " +
+         "Восьми изломов мало для гладких холмов, поэтому здесь ReLU уступает (в больших сетях она — стандарт).", 0.03],
+  leaky: ["ReLU с маленьким наклоном 0.01 слева: нейрон не «умирает» насовсем, если z всегда < 0.", 0.03],
+  gauss: ["«колокол»: каждый нейрон — не ступенька, а гребень. В опытах лучшая для холмов: " +
+          "яичная коробка и сомбреро учатся в 5–20 раз точнее, чем с сигмоидой.", 0.1],
+};
+
+// Мини-график функции активации f(z) для z от −4 до 4
+function drawActPlot(key) {
+  const cv = $("actPlot"), [ctx, w, h] = setup(cv, ...dims(cv)), f = ENGINE.ACTS[key].f;
+  const zs = Array.from({ length: 81 }, (_, k) => -4 + k * 0.1), ys = zs.map(f);
+  const lo = Math.min(0, ...ys), hi = Math.max(1, ...ys), pad = 5;
+  const X = z => pad + (z + 4) / 8 * (w - 2 * pad), Y = v => h - pad - (v - lo) / (hi - lo) * (h - 2 * pad);
+  ctx.strokeStyle = css("--grid"); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(X(-4), Y(0)); ctx.lineTo(X(4), Y(0)); ctx.moveTo(X(0), pad); ctx.lineTo(X(0), h - pad); ctx.stroke();
+  ctx.strokeStyle = css("--accent"); ctx.lineWidth = 2; ctx.beginPath();
+  zs.forEach((z, k) => k ? ctx.lineTo(X(z), Y(ys[k])) : ctx.moveTo(X(z), Y(ys[k]))); ctx.stroke();
+}
+
 function render() {
   if (!S) return;
   range = S.range;
@@ -941,6 +1005,17 @@ function render() {
   document.querySelectorAll(".formulaName").forEach(e => e.textContent = S.formula);
   const neg = S.domain === "pm1";
   if (document.activeElement !== $("r2")) $("r2").checked = S.r2;
+  if (!$("act").options.length) $("act").innerHTML = S.acts.map(o => `<option value="${o.key}">${o.name}</option>`).join("");
+  if (document.activeElement !== $("act")) $("act").value = S.act;
+  drawActPlot(S.act);
+  const A = S.acts.find(o => o.key === S.act);
+  $("hFormula").textContent = "h = " + A.formula;
+  const [actText, actLr] = ACT_HINTS[S.act];
+  $("actHint").innerHTML = `${A.name}: ${actText} Рекомендуемая скорость обучения — ${actLr}.` +
+    (Math.abs(+$("lr").value - actLr) > 1e-9 ? `<button class="btn" id="actLrBtn">поставить ${actLr}</button>` : "");
+  if ($("actLrBtn")) $("actLrBtn").onclick = () => {
+    $("lr").value = actLr; $("lr").oninput();
+  };
   $("funcHint").textContent = {
     xor: (neg ? "1, если у чисел разные знаки. " : "") + "XOR-ступенька — трудная задача для 8 нейронов: резкие края плохо описываются плавными сигмоидами. " +
          "Поставьте скорость обучения 0.05–0.1 и дайте сети несколько тысяч эпох — ошибка будет медленно снижаться.",
@@ -980,7 +1055,7 @@ async function poll() {
       $("lr").value = st.lr; $("lrVal").textContent = st.lr.toFixed(2);
       $("speed").value = st.speed; $("speedVal").textContent = st.speed;
     }
-    const changed = !S || st.epoch !== S.epoch || st.running !== S.running || st.message !== S.message || st.loaded !== S.loaded || st.func !== S.func || st.domain !== S.domain || st.r2 !== S.r2;
+    const changed = !S || st.epoch !== S.epoch || st.running !== S.running || st.message !== S.message || st.loaded !== S.loaded || st.func !== S.func || st.domain !== S.domain || st.r2 !== S.r2 || st.act !== S.act;
     S = st;
     if (changed) render();
   } catch (e) {
@@ -1018,6 +1093,7 @@ $("fileInput").onchange = async () => {
   control({ action: "file", name: f.name, data });
   $("fileInput").value = "";
 };
+$("act").onchange = () => { histTrain = []; histTest = []; control({ action: "act", act: $("act").value }); };
 $("r2").onchange = () => { histTrain = []; histTest = []; control({ action: "r2", on: $("r2").checked }); };
 $("domain").onchange = () => { histTrain = []; histTest = []; control({ action: "domain", domain: $("domain").value }); };
 $("x1").oninput = $("x2").oninput = () => S && inputsChanged();

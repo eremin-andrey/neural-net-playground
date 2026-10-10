@@ -184,6 +184,10 @@ class NeuralNetwork:
     def load(cls, path):
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
+        if d.get("act", "sigmoid") != "sigmoid":
+            # другие функции активации (tanh, ReLU, …) есть только в браузерной версии index.html
+            raise ValueError(f"{path}: активация «{d['act']}» есть только в браузерной версии (index.html), "
+                             "Python-версия умеет только сигмоиду")
         net = cls(n_inputs=len(d["w1"][0]), n_hidden=len(d["w1"]), r2_input=d.get("r2", False))
         net.w1, net.b1, net.w2, net.b2 = d["w1"], d["b1"], d["w2"], d["b2"]
         net.func = d.get("func", DEFAULT_FUNC)  # старые файлы — умножение
