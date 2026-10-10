@@ -69,6 +69,8 @@
   table.calc[data-stage="in"]  .c-in,
   table.calc[data-stage="act"] .c-act,
   table.calc[data-stage="out"] .c-out,
+  table.calc[data-stage="in2"] .c-in2,
+  table.calc[data-stage="act2"] .c-act2,
   table.calc[data-stage="sum"] .c-sum { background: color-mix(in srgb, var(--test) 22%, transparent); }
   canvas.surf { cursor: grab; touch-action: none; }
   canvas.surf.drag { cursor: grabbing; }
@@ -95,6 +97,8 @@
       <label class="range">функция <select class="btn" id="func"></select></label>
       <label class="range" title="функция активации скрытых нейронов; при смене сеть сбрасывается">активация
         <select class="btn" id="act"></select></label>
+      <label class="range" title="1 слой: 2-8-1; 2 слоя: 2-8-8-1. При смене сеть сбрасывается">скрытых слоёв
+        <select class="btn" id="layers"><option value="1">1</option><option value="2">2 (8 + 8)</option></select></label>
       <canvas id="actPlot" width="120" height="40" title="график функции активации f(z), z от −4 до 4"></canvas>
       <button class="btn primary" id="startBtn">▶ Старт</button>
       <button class="btn" data-action="reset">↺ Сброс</button>
@@ -181,6 +185,11 @@
       <p class="formula">Каждый скрытый нейрон: <code id="zFormula">z = w₁·x1 + w₂·x2 + b</code>, затем <code id="hFormula">h = σ(z) = 1 / (1 + e^(−z))</code>.
         Выход: <code>y = Σ h·w<sub>вых</sub> + b<sub>вых</sub></code>. Под каждым числом — как оно получено.</p>
       <div class="calc-wrap"><table class="calc" id="calc"></table></div>
+      <div id="calc2Wrap" hidden>
+        <p class="formula" style="margin-top: 14px"><b>Слой 2.</b> Каждый его нейрон получает все 8 выходов слоя 1:
+          <code>z = Σ w·h¹ + b</code> (8 слагаемых), затем <code id="hFormula2"></code>.</p>
+        <div class="calc-wrap"><table class="calc" id="calc2"></table></div>
+      </div>
     </div>
   </section>
 </main>
@@ -269,10 +278,10 @@ const ENGINE = (() => {
   }
 
   // Имя файла весов — как у Python-версии, файлы взаимозаменяемы
-  function weightsFile(f, d, r2, act = DEFAULT_ACT) {
-    if (f === DEFAULT_FUNC && d === DEFAULT_DOMAIN && !r2 && act === DEFAULT_ACT) return "weights.json";
+  function weightsFile(f, d, r2, act = DEFAULT_ACT, layers = 1) {
+    if (f === DEFAULT_FUNC && d === DEFAULT_DOMAIN && !r2 && act === DEFAULT_ACT && layers === 1) return "weights.json";
     return `weights_${f}` + (d === DEFAULT_DOMAIN ? "" : `_${d}`) + (r2 ? "_r2" : "")
-      + (act === DEFAULT_ACT ? "" : `_${act}`) + ".json";
+      + (act === DEFAULT_ACT ? "" : `_${act}`) + (layers === 1 ? "" : `_${layers}l`) + ".json";
   }
 
   function makeDataset(n, seed, f, d) {
@@ -284,44 +293,81 @@ const ENGINE = (() => {
     return data;
   }
 
-  // ---------- сама сеть: входы (+ подсказка r²) -> скрытый слой (активация act) -> 1 линейный выход ----------
+  // ---------- сама сеть: входы (+ подсказка r²) -> 1 или 2 скрытых слоя (активация act) -> 1 линейный выход ----------
+  // w1, b1 — первый скрытый слой; wh, bh — второй (только при layers = 2); w2, b2 — выход
   class Net {
-    constructor(nHidden = HIDDEN, rnd = Math.random, r2 = false, act = DEFAULT_ACT) {
+    constructor(nHidden = HIDDEN, rnd = Math.random, r2 = false, act = DEFAULT_ACT, layers = 1) {
       this.r2 = r2;
       this.act = act;
+      this.layers = layers;
       const nIn = r2 ? 3 : 2;
       const lim1 = Math.sqrt(6 / (nIn + nHidden)), lim2 = Math.sqrt(6 / (nHidden + 1));  // Ксавье
+      const limh = Math.sqrt(6 / (nHidden + nHidden));
       const u = lim => (rnd() * 2 - 1) * lim;
       this.w1 = Array.from({ length: nHidden }, () => Array.from({ length: nIn }, () => u(lim1)));
       this.b1 = new Array(nHidden).fill(0);
+      if (layers === 2) {
+        // wh[j][i] — вес связи от нейрона i первого слоя к нейрону j второго
+        this.wh = Array.from({ length: nHidden }, () => Array.from({ length: nHidden }, () => u(limh)));
+        this.bh = new Array(nHidden).fill(0);
+      }
       this.w2 = Array.from({ length: nHidden }, () => u(lim2));
       this.b2 = 0;
     }
     features(x) { return this.r2 ? [x[0], x[1], x[0] * x[0] + x[1] * x[1]] : x; }
-    // возвращает [выход, активации скрытого слоя h, их суммы z]
-    _forward(x) {
-      const f = ACTS[this.act].f, zs = [];
-      const h = this.w1.map((row, j) => {
+    // один слой: z = W·a + b, h = f(z)
+    static _layer(W, B, a, f) {
+      const zs = [];
+      const h = W.map((row, j) => {
         let z = 0;
-        for (let i = 0; i < row.length; i++) z += row[i] * x[i];
-        z += this.b1[j];
+        for (let i = 0; i < row.length; i++) z += row[i] * a[i];
+        z += B[j];
         zs.push(z);
         return f(z);
       });
+      return [h, zs];
+    }
+    // возвращает [выход, активации последнего скрытого слоя, их суммы z, активации и суммы первого слоя]
+    _forward(x) {
+      const f = ACTS[this.act].f;
+      const [h1, z1] = Net._layer(this.w1, this.b1, x, f);
+      const [h, zs] = this.layers === 2 ? Net._layer(this.wh, this.bh, h1, f) : [h1, z1];
       let y = 0;
       for (let j = 0; j < h.length; j++) y += this.w2[j] * h[j];
-      return [y + this.b2, h, zs];
+      return [y + this.b2, h, zs, h1, z1];
     }
     forward(x) { return this._forward(this.features(x)); }
     predict(x1, x2) { return this.forward([x1, x2])[0]; }
     trainStep(x, t, lr) {
       x = this.features(x);
+      if (this.layers === 2) return this._trainStep2(x, t, lr);
       const [y, h, z] = this._forward(x), err = y - t, grad = ACTS[this.act].grad;
       for (let j = 0; j < this.w2.length; j++) {
         const dh = grad(err * this.w2[j], z[j], h[j]);   // считаем ДО изменения w2[j]
         this.w2[j] -= lr * err * h[j];
         for (let i = 0; i < x.length; i++) this.w1[j][i] -= lr * dh * x[i];
         this.b1[j] -= lr * dh;
+      }
+      this.b2 -= lr * err;
+      return err * err;
+    }
+    // обратное распространение через два скрытых слоя: сначала все ошибки (по старым весам), потом изменения
+    _trainStep2(x, t, lr) {
+      const [y, h2, z2, h1, z1] = this._forward(x), err = y - t, grad = ACTS[this.act].grad, n = h1.length;
+      const d2 = h2.map((h, j) => grad(err * this.w2[j], z2[j], h));             // ошибка нейронов слоя 2
+      const d1 = h1.map((h, i) => {                                                // ошибка нейронов слоя 1
+        let g = 0;
+        for (let j = 0; j < n; j++) g += this.wh[j][i] * d2[j];
+        return grad(g, z1[i], h);
+      });
+      for (let j = 0; j < n; j++) {
+        this.w2[j] -= lr * err * h2[j];
+        for (let i = 0; i < n; i++) this.wh[j][i] -= lr * d2[j] * h1[i];
+        this.bh[j] -= lr * d2[j];
+      }
+      for (let i = 0; i < n; i++) {
+        for (let k = 0; k < x.length; k++) this.w1[i][k] -= lr * d1[i] * x[k];
+        this.b1[i] -= lr * d1[i];
       }
       this.b2 -= lr * err;
       return err * err;
@@ -342,17 +388,21 @@ const ENGINE = (() => {
       return s / data.length;
     }
     toJSON(func, domain) {
-      return { func, domain, r2: this.r2, act: this.act, w1: this.w1, b1: this.b1, w2: this.w2, b2: this.b2 };
+      const d = { func, domain, r2: this.r2, act: this.act, w1: this.w1, b1: this.b1, w2: this.w2, b2: this.b2 };
+      if (this.layers === 2) Object.assign(d, { layers: 2, wh: this.wh, bh: this.bh });   // однослойные — прежний формат
+      return d;
     }
     static fromJSON(d) {
-      const net = new Net(d.w1.length, Math.random, !!d.r2, d.act || DEFAULT_ACT);   // старые файлы — сигмоида
+      const layers = d.layers || 1;   // старые файлы — один слой, сигмоида
+      const net = new Net(d.w1.length, Math.random, !!d.r2, d.act || DEFAULT_ACT, layers);
       net.w1 = d.w1.map(r => r.slice()); net.b1 = d.b1.slice(); net.w2 = d.w2.slice(); net.b2 = d.b2;
+      if (layers === 2) { net.wh = d.wh.map(r => r.slice()); net.bh = d.bh.slice(); }
       return net;
     }
   }
 
   // ---------- «тренер»: то, что делал web_app.py ----------
-  const T = { func: DEFAULT_FUNC, domain: START_DOMAIN, r2: false, act: DEFAULT_ACT, lr: 0.3, speed: 2,
+  const T = { func: DEFAULT_FUNC, domain: START_DOMAIN, r2: false, act: DEFAULT_ACT, layers: 1, lr: 0.3, speed: 2,
               running: false, message: "", source: "" };
 
   function gridPoints() {
@@ -366,7 +416,7 @@ const ENGINE = (() => {
     T.range = valueRange(T.func, T.domain);
     const pts = gridPoints();
     T.trueGrid = pts.map(b => pts.map(a => target(a, b, T.func, T.domain)));
-    T.net = new Net(HIDDEN, Math.random, T.r2, T.act);
+    T.net = new Net(HIDDEN, Math.random, T.r2, T.act, T.layers);
     T.rnd = Math.random;
     T.epoch = 0; T.histTrain = []; T.histTest = [];
     T.loaded = false; T.source = "";
@@ -391,23 +441,26 @@ const ENGINE = (() => {
     const pts = gridPoints(), net = T.net, [, lo, hi] = DOMAINS[T.domain];
     return {
       func: T.func, domain: T.domain, inputs: [lo, hi], range: T.range,
-      formula: formula(T.func, T.domain), file: weightsFile(T.func, T.domain, net.r2, net.act), source: T.source,
-      r2: net.r2, act: net.act,
+      formula: formula(T.func, T.domain), file: weightsFile(T.func, T.domain, net.r2, net.act, net.layers), source: T.source,
+      r2: net.r2, act: net.act, layers: net.layers,
       acts: Object.entries(ACTS).map(([key, a]) => ({ key, name: a.name, formula: a.formula })),
       domains: Object.entries(DOMAINS).map(([key, d]) => ({ key, name: d[0] })),
       funcs: Object.entries(FUNCTIONS).map(([key, f]) => ({ key, name: f[0], available: hasDomain(key, T.domain),
                                                             formula: hasDomain(key, T.domain) ? formula(key, T.domain) : "" })),
       epoch: T.epoch, running: T.running, lr: T.lr, speed: T.speed, loaded: T.loaded, message: T.message,
       since, train: T.histTrain.slice(since), test: T.histTest.slice(since),
-      w1: net.w1, b1: net.b1, w2: net.w2, b2: net.b2,
+      w1: net.w1, b1: net.b1, w2: net.w2, b2: net.b2, wh: net.wh, bh: net.bh,
       grid: pts.map(b => pts.map(a => net.predict(a, b))), true_grid: T.trueGrid,
     };
   }
 
+  // hidden — активации первого скрытого слоя, hidden2 — второго (если он есть)
   function predict(x1, x2) {
-    const net = T.net, [y, hidden] = net.forward([x1, x2]);
-    return { y, hidden, act: net.act, target: target(x1, x2, T.func, T.domain),
-             w1: net.w1.map(r => r.slice()), b1: net.b1.slice(), w2: net.w2.slice(), b2: net.b2 };
+    const net = T.net, [y, hLast, , h1] = net.forward([x1, x2]);
+    const out = { y, hidden: h1, act: net.act, layers: net.layers, target: target(x1, x2, T.func, T.domain),
+                  w1: net.w1.map(r => r.slice()), b1: net.b1.slice(), w2: net.w2.slice(), b2: net.b2 };
+    if (net.layers === 2) Object.assign(out, { hidden2: hLast, wh: net.wh.map(r => r.slice()), bh: net.bh.slice() });
+    return out;
   }
 
   // ---------- сохранение: файл .json (как у Python) + копия в памяти браузера ----------
@@ -430,8 +483,9 @@ const ENGINE = (() => {
     const func = d.func || DEFAULT_FUNC, domain = d.domain || DEFAULT_DOMAIN;   // старые файлы — умножение на 0..1
     if (!(func in FUNCTIONS) || !(domain in DOMAINS) || !hasDomain(func, domain)) throw new Error("неизвестная функция или диапазон");
     if (d.act && !(d.act in ACTS)) throw new Error(`неизвестная функция активации «${d.act}»`);
+    if (d.layers && d.layers !== 1 && !(d.layers === 2 && Array.isArray(d.wh))) throw new Error("неверное число слоёв");
     T.running = false;
-    T.func = func; T.domain = domain; T.r2 = !!d.r2; T.act = d.act || DEFAULT_ACT;
+    T.func = func; T.domain = domain; T.r2 = !!d.r2; T.act = d.act || DEFAULT_ACT; T.layers = d.layers || 1;
     reset();
     T.net = Net.fromJSON(d);
     T.loaded = true; T.source = source;
@@ -447,6 +501,8 @@ const ENGINE = (() => {
       T.running = false; T.func = cmd.func; reset();
     } else if (action === "r2") {
       T.running = false; T.r2 = !!cmd.on; reset();
+    } else if (action === "layers" && (cmd.layers === 1 || cmd.layers === 2)) {
+      T.running = false; T.layers = cmd.layers; reset();
     } else if (action === "act" && cmd.act in ACTS) {
       T.running = false; T.act = cmd.act; reset();
     } else if (action === "domain" && cmd.domain in DOMAINS) {
@@ -463,12 +519,12 @@ const ENGINE = (() => {
     } else if (action === "reset") {
       T.running = false; reset();
     } else if (action === "save") {
-      const name = weightsFile(T.func, T.domain, T.net.r2, T.net.act), obj = T.net.toJSON(T.func, T.domain);
+      const name = weightsFile(T.func, T.domain, T.net.r2, T.net.act, T.net.layers), obj = T.net.toJSON(T.func, T.domain);
       store.set(LS(name), obj);
       download(name, obj);
       T.message = `Веса скачаны в файл ${name} и запомнены в браузере`;
     } else if (action === "load") {
-      const name = weightsFile(T.func, T.domain, T.r2, T.act), obj = store.get(LS(name));
+      const name = weightsFile(T.func, T.domain, T.r2, T.act, T.layers), obj = store.get(LS(name));
       if (!obj) T.message = `В браузере нет сохранённых весов ${name} — сначала нажмите «Сохранить» или откройте файл`;
       else loadObject(obj, `${name} (из памяти браузера)`);
     } else if (action === "preset") {
@@ -575,25 +631,32 @@ function drawMap(cv, func, colorer, mark) {
 }
 
 // ---------- схема сети ----------
-// Фазы анимации прохода сигнала (доли от общего времени):
-// 0 — горят входы, 1 — сигнал бежит к скрытому слою, 2 — скрытые нейроны «загораются»,
-// 3 — сигнал бежит к выходу, 4 — появляется ответ.
-const PHASES = [0, 0.12, 0.42, 0.55, 0.85, 1];
-const ANIM_MS = 2400;
-function phaseOf(p) {
-  for (let k = 0; k < 5; k++) if (p < PHASES[k + 1]) return [k, (p - PHASES[k]) / (PHASES[k + 1] - PHASES[k])];
-  return [5, 1];
+// Фазы анимации прохода сигнала (доли от общего времени). Для L скрытых слоёв фаз 2L + 3:
+// 0 — горят входы; для каждого слоя l: 2l − 1 — сигнал бежит к слою, 2l — его нейроны «загораются»;
+// 2L + 1 — сигнал бежит к выходу, 2L + 2 — появляется ответ.
+const PHASES = { 1: [0, 0.12, 0.42, 0.55, 0.85, 1],
+                 2: [0, 0.08, 0.27, 0.36, 0.55, 0.64, 0.84, 1] };
+const ANIM_MS_BY = { 1: 2400, 2: 3200 };
+const STAGES = { 1: ["in", "in", "act", "out", "sum"],                    // что подсвечивать в таблице расчёта
+                 2: ["in", "in", "act", "in2", "act2", "out", "sum"] };
+function phaseOf(p, layers = 1) {
+  const P = PHASES[layers];
+  for (let k = 0; k < P.length - 1; k++) if (p < P[k + 1]) return [k, (p - P[k]) / (P[k + 1] - P[k])];
+  return [P.length - 1, 1];
 }
 
 // p — прогресс анимации 0..1, null — без анимации (всё показано сразу)
 function drawNetwork(cv, net, input, out, p = null) {
-  const [phase, t] = p == null ? [5, 1] : phaseOf(p);
-  const hiddenK = !out ? 0 : phase > 2 ? 1 : phase === 2 ? t : 0;   // насколько «загорелись» скрытые
-  const outK = !out ? 0 : phase > 4 ? 1 : phase === 4 ? t : 0;      // и выход
+  const L = net.layers || 1;                                  // скрытых слоёв: 1 или 2
+  const [phase, t] = p == null ? [99, 1] : phaseOf(p, L);
+  const lightK = ph => !out ? 0 : phase > ph ? 1 : phase === ph ? t : 0;   // насколько «загорелся» слой
+  const hiddenK = lightK(2), hidden2K = lightK(4), outK = lightK(2 * L + 2);
   const [ctx, w, h] = setup(cv, ...dims(cv));
   const nh = net.w2.length, nin = net.w1[0].length;   // nin = 3, если включена подсказка r²
   if (input && nin === 3) input = [input[0], input[1], input[0] ** 2 + input[1] ** 2];
-  const xs = [70, w / 2, w - 80];
+  // столбцы: входы, скрытые слои, выход; xs[L] — последний скрытый слой, xs[L + 1] — выход
+  const xs = L === 2 ? [70, w * 0.37, w * 0.64, w - 70] : [70, w / 2, w - 80];
+  const xOut = xs[L + 1], xLast = xs[L];
   const inY = nin === 3 ? [h / 4, h / 2, 3 * h / 4] : [h / 3, 2 * h / 3], outY = h / 2;
   const IN_NAMES = ["x1", "x2", "r²"];
   // цвет входного нейрона: x1, x2 — по диапазону входов, r² — от 0 до своего максимума
@@ -607,9 +670,17 @@ function drawNetwork(cv, net, input, out, p = null) {
     ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
     ctx.globalAlpha = 1;
   };
+  if (L === 2)   // 64 связи между скрытыми слоями — тоньше и прозрачнее, без подписей
+    for (let j = 0; j < nh; j++) for (let i = 0; i < nh; i++) {
+      ctx.globalAlpha = 0.5;
+      ctx.strokeStyle = net.wh[j][i] >= 0 ? css("--pos") : css("--neg");
+      ctx.lineWidth = Math.max(0.3, Math.min(5, Math.abs(net.wh[j][i]) * 1.2));
+      ctx.beginPath(); ctx.moveTo(xs[1], hidY[i]); ctx.lineTo(xs[2], hidY[j]); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
   for (let j = 0; j < nh; j++) {
     for (let i = 0; i < nin; i++) line(xs[0], inY[i], xs[1], hidY[j], net.w1[j][i]);
-    line(xs[1], hidY[j], xs[2], outY, net.w2[j]);
+    line(xLast, hidY[j], xOut, outY, net.w2[j]);
   }
   // value — уже нормированное значение 0..1 (для цвета), k — яркость появления 0..1
   const node = (x, y, r, value, label, k = 1) => {
@@ -632,11 +703,15 @@ function drawNetwork(cv, net, input, out, p = null) {
   const rSmall = Math.min(15, (h - 50) / nh / 2 - 2);
   // активация скрытого нейрона → 0..1 для цвета: у tanh диапазон −1..1, у ReLU — от 0 до максимума в слое
   const act = ENGINE.ACTS[net.act || "sigmoid"];
-  const hMax = out ? Math.max(1e-9, ...out.hidden.map(Math.abs)) : 1;
-  const hidColor = v => {
-    const [lo, hi] = act.range;
-    return lo != null && hi != null ? (v - lo) / (hi - lo) : Math.max(0, v / hMax);
+  const hidColorFor = hs => {
+    const hMax = hs ? Math.max(1e-9, ...hs.map(Math.abs)) : 1;
+    return v => {
+      const [lo, hi] = act.range;
+      return lo != null && hi != null ? (v - lo) / (hi - lo) : Math.max(0, v / hMax);
+    };
   };
+  const hidColor = hidColorFor(out && out.hidden), hidColor2 = hidColorFor(out && out.hidden2);
+  const hLast = out ? (L === 2 ? out.hidden2 : out.hidden) : null;   // выходы последнего скрытого слоя
   // Бегущие точки сигнала: размер — величина вклада |вес × значение|, цвет — знак
   const dot = (x0, y0, x1, y1, tt, v) => {
     const r = 2.5 + Math.min(6, Math.abs(v) * 5);
@@ -648,8 +723,10 @@ function drawNetwork(cv, net, input, out, p = null) {
   if (input && out && phase === 1)
     for (let j = 0; j < nh; j++)
       for (let i = 0; i < nin; i++) dot(xs[0], inY[i], xs[1], hidY[j], ease(t), net.w1[j][i] * input[i]);
-  if (out && phase === 3)
-    for (let j = 0; j < nh; j++) dot(xs[1], hidY[j], xs[2], outY, ease(t), net.w2[j] * out.hidden[j]);
+  if (out && L === 2 && phase === 3)
+    for (let j = 0; j < nh; j++) for (let i = 0; i < nh; i++) dot(xs[1], hidY[i], xs[2], hidY[j], ease(t), net.wh[j][i] * out.hidden[i]);
+  if (out && phase === 2 * L + 1)
+    for (let j = 0; j < nh; j++) dot(xLast, hidY[j], xOut, outY, ease(t), net.w2[j] * hLast[j]);
 
   // Подсветка («ореол») слоя, который сейчас работает
   const halo = (x, y, r) => {
@@ -657,8 +734,9 @@ function drawNetwork(cv, net, input, out, p = null) {
     ctx.beginPath(); ctx.arc(x, y, r + 5, 0, 7); ctx.stroke(); ctx.globalAlpha = 1;
   };
   if (p != null && input && (phase === 0 || phase === 1)) for (let i = 0; i < nin; i++) halo(xs[0], inY[i], 24);
-  if (p != null && (phase === 2 || phase === 3)) for (let j = 0; j < nh; j++) halo(xs[1], hidY[j], rSmall);
-  if (p != null && phase === 4) halo(xs[2], outY, 26);
+  for (let l = 1; l <= L; l++)
+    if (p != null && (phase === 2 * l || phase === 2 * l + 1)) for (let j = 0; j < nh; j++) halo(xs[l], hidY[j], rSmall);
+  if (p != null && phase === 2 * L + 2) halo(xOut, outY, 26);
 
   for (let i = 0; i < nin; i++) node(xs[0], inY[i], 24, input ? normInput(i, input[i]) : null, input ? input[i].toFixed(2) : IN_NAMES[i]);
   if (nin === 3) {  // пометить, что третий вход — подсказка
@@ -666,7 +744,9 @@ function drawNetwork(cv, net, input, out, p = null) {
     ctx.fillText(input ? "r² (подсказка)" : "подсказка", xs[0], inY[2] + 38);
   }
   for (let j = 0; j < nh; j++) node(xs[1], hidY[j], rSmall, out ? hidColor(out.hidden[j]) : null, out && rSmall >= 14 ? out.hidden[j].toFixed(2) : "", hiddenK);
-  node(xs[2], outY, 26, out ? norm(out.y) : null, out ? out.y.toFixed(3) : "y", out ? outK : 1);
+  if (L === 2)
+    for (let j = 0; j < nh; j++) node(xs[2], hidY[j], rSmall, out ? hidColor2(out.hidden2[j]) : null, out && rSmall >= 14 ? out.hidden2[j].toFixed(2) : "", hidden2K);
+  node(xOut, outY, 26, out ? norm(out.y) : null, out ? out.y.toFixed(3) : "y", out ? outK : 1);
 
   if (showWeights) {
     // Подпись в «таблетке» цвета фона, чтобы читалась поверх линий
@@ -683,14 +763,17 @@ function drawNetwork(cv, net, input, out, p = null) {
     const T_IN = nin === 3 ? [0.52, 0.80, 0.66] : [0.58, 0.80];  // разные места для разных входов, чтобы подписи не налезали
     for (let j = 0; j < nh; j++) {
       for (let i = 0; i < nin; i++) tag(...at(xs[0], inY[i], xs[1], hidY[j], T_IN[i]), fmt(net.w1[j][i]), wColor(net.w1[j][i]));
-      tag(...at(xs[1], hidY[j], xs[2], outY, 0.22), fmt(net.w2[j]), wColor(net.w2[j]));
+      tag(...at(xLast, hidY[j], xOut, outY, 0.22), fmt(net.w2[j]), wColor(net.w2[j]));
       tag(xs[1], hidY[j] + rSmall + 7, "b " + fmt(net.b1[j]), css("--muted"), "9px sans-serif");
+      if (L === 2) tag(xs[2], hidY[j] + rSmall + 7, "b " + fmt(net.bh[j]), css("--muted"), "9px sans-serif");
     }
-    tag(xs[2], outY + 26 + 9, "b " + fmt(net.b2), css("--muted"), "9px sans-serif");
+    tag(xOut, outY + 26 + 9, "b " + fmt(net.b2), css("--muted"), "9px sans-serif");
   }
 
   ctx.fillStyle = css("--muted"); ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
-  ctx.fillText("входы", xs[0], 12); ctx.fillText(`скрытый слой (${nh}, ${act.name})`, xs[1], 12); ctx.fillText("выход", xs[2], 12);
+  ctx.fillText("входы", xs[0], 12); ctx.fillText("выход", xOut, 12);
+  if (L === 2) { ctx.fillText(`слой 1 (${nh}, ${act.name})`, xs[1], 12); ctx.fillText(`слой 2 (${nh}, ${act.name})`, xs[2], 12); }
+  else ctx.fillText(`скрытый слой (${nh}, ${act.name})`, xs[1], 12);
   ctx.fillText("синий — положительный вес, красный — отрицательный, толщина — величина", w / 2, h - (showWeights ? 20 : 6));
   if (showWeights) ctx.fillText("числа на линиях — веса, b — смещение (bias) нейрона", w / 2, h - 6);
 }
@@ -909,72 +992,107 @@ function renderCalc() {
   const sg = v => v >= 0 ? "pos" : "neg";
   const cell = (cls, v, how, d) => `<td class="${cls}"><span class="${sg(v)}">${f(v, d)}</span>${how ? `<small>${how}</small>` : ""}</td>`;
   const hint = out.w1[0].length === 3, r2 = x1 * x1 + x2 * x2;   // подсказка r² — третий вход
-  const act = ENGINE.ACTS[out.act];
+  const act = ENGINE.ACTS[out.act], two = out.layers === 2;
+  // слой 1: входы → h¹ (при одном слое сразу и вклад в выход)
   let rows = "", sum = 0;
-  out.w2.forEach((wo, j) => {
-    const [wa, wb, wc = 0] = out.w1[j], b = out.b1[j];
-    const z = wa * x1 + wb * x2 + (hint ? wc * r2 : 0) + b, h = act.f(z), c = h * wo;
-    sum += c;
-    rows += `<tr><td>h${j + 1}</td>` +
+  const h1 = out.w1.map((row, j) => {
+    const [wa, wb, wc = 0] = row, b = out.b1[j];
+    const z = wa * x1 + wb * x2 + (hint ? wc * r2 : 0) + b, h = act.f(z);
+    rows += `<tr><td>h${two ? "¹" : ""}${j + 1}</td>` +
       cell("c-in", wa * x1, `${f(wa)} × ${x1.toFixed(2)}`) +
       cell("c-in", wb * x2, `${f(wb)} × ${x2.toFixed(2)}`) +
       (hint ? cell("c-in", wc * r2, `${f(wc)} × ${r2.toFixed(3)}`) : "") +
       cell("c-in", b, "") +
       cell("c-in", z, "сумма") +
-      cell("c-act", h, `${act.sym}(${f(z, 2)})`) +
-      cell("c-out", wo, "") +
-      cell("c-out", c, `${h.toFixed(3)} × ${f(wo)}`) + "</tr>";
+      cell("c-act", h, `${act.sym}(${f(z, 2)})`);
+    if (!two) {
+      const wo = out.w2[j], c = h * wo;
+      sum += c;
+      rows += cell("c-out", wo, "") + cell("c-out", c, `${h.toFixed(3)} × ${f(wo)}`);
+    }
+    rows += "</tr>";
+    return h;
+  });
+  // слой 2: h¹ → h² → вклад в выход
+  let rows2 = "";
+  if (two) out.wh.forEach((row, j) => {
+    let z = 0;
+    for (let i = 0; i < row.length; i++) z += row[i] * h1[i];
+    z += out.bh[j];
+    const h = act.f(z), wo = out.w2[j], c = h * wo;
+    sum += c;
+    const terms = row.slice(0, 2).map((w, i) => `${f(w, 2)}·${h1[i].toFixed(2)}`).join(" + ") + " + …";
+    rows2 += `<tr><td>h²${j + 1}</td>` +
+      cell("c-in2", z - out.bh[j], terms) + cell("c-in2", out.bh[j], "") + cell("c-in2", z, "сумма") +
+      cell("c-act2", h, `${act.sym}(${f(z, 2)})`) +
+      cell("c-out", wo, "") + cell("c-out", c, `${h.toFixed(3)} × ${f(wo)}`) + "</tr>";
   });
   const y = sum + out.b2;
-  const foot = (label, v, cls = "") => `<tr class="${cls}"><td class="c-sum" colspan="${hint ? 8 : 7}" style="text-align:right">${label}</td>` +
+  const cols = two ? 6 : (hint ? 8 : 7);
+  const foot = (label, v, cls = "") => `<tr class="${cls}"><td class="c-sum" colspan="${cols}" style="text-align:right">${label}</td>` +
     `<td class="c-sum"><span class="${sg(v)}">${f(v, 4)}</span></td></tr>`;
-  $("calc").innerHTML =
-    `<thead><tr><th>Нейрон</th><th class="c-in">w₁·x1</th><th class="c-in">w₂·x2</th>` +
-    (hint ? `<th class="c-in">w₃·r²</th>` : "") + `<th class="c-in">b</th>` +
-    `<th class="c-in">z = сумма</th><th class="c-act">h = ${act.sym}(z)</th><th class="c-out">w<sub>вых</sub></th>` +
-    `<th class="c-out">вклад h·w<sub>вых</sub></th></tr></thead><tbody>${rows}</tbody><tfoot>` +
-    foot("Σ вкладов всех скрытых нейронов", sum) +
+  const footer = `<tfoot>` +
+    foot(`Σ вкладов всех нейронов ${two ? "слоя 2" : "скрытого слоя"}`, sum) +
     foot("+ смещение выхода b<sub>вых</sub>", out.b2) +
     foot("= ответ сети y", y, "total") +
     foot(`правильный ответ ${S.formula}`, out.target) +
     foot("ошибка y − правильный", y - out.target) + "</tfoot>";
+  const outHead = `<th class="c-out">w<sub>вых</sub></th><th class="c-out">вклад h·w<sub>вых</sub></th>`;
+  $("calc").innerHTML =
+    `<thead><tr><th>Нейрон</th><th class="c-in">w₁·x1</th><th class="c-in">w₂·x2</th>` +
+    (hint ? `<th class="c-in">w₃·r²</th>` : "") + `<th class="c-in">b</th>` +
+    `<th class="c-in">z = сумма</th><th class="c-act">h = ${act.sym}(z)</th>` + (two ? "" : outHead) +
+    `</tr></thead><tbody>${rows}</tbody>` + (two ? "" : footer);
+  $("calc2Wrap").hidden = !two;
+  if (two) {
+    $("hFormula2").textContent = `h² = ${act.sym}(z)`;
+    $("calc2").innerHTML = `<thead><tr><th>Нейрон</th><th class="c-in2">Σ w·h¹ (8 слагаемых)</th><th class="c-in2">b</th>` +
+      `<th class="c-in2">z = сумма</th><th class="c-act2">h² = ${act.sym}(z)</th>` + outHead +
+      `</tr></thead><tbody>${rows2}</tbody>` + footer;
+  }
 }
 
 // ---------- анимация прохода сигнала ----------
-const STAGE_COLS = ["in", "in", "act", "out", "sum"];
+const animLayers = () => (work && work.out.layers) || 1;
+const setStage = st => { $("calc").dataset.stage = st; $("calc2").dataset.stage = st; };
 function startAnim() {
   if (!work) return;
   anim = performance.now();
   requestAnimationFrame(animFrame);
 }
 function animFrame() {
-  if (anim == null || tab !== "work") { anim = null; $("calc").dataset.stage = ""; return; }
+  if (anim == null || tab !== "work") { anim = null; setStage(""); return; }
   // время берём сами: метка, которую передаёт requestAnimationFrame, может быть меньше момента старта
-  const p = Math.min(1, Math.max(0, (performance.now() - anim) / ANIM_MS));
-  const [phase] = phaseOf(p);
-  $("calc").dataset.stage = p < 1 ? STAGE_COLS[phase] : "";
+  const L = animLayers();
+  const p = Math.min(1, Math.max(0, (performance.now() - anim) / ANIM_MS_BY[L]));
+  const [phase] = phaseOf(p, L);
+  // при одном слое после «act» подсвечиваются столбцы выхода, при двух — вторая таблица
+  setStage(p < 1 ? (L === 1 && phase === 3 ? "out" : STAGES[L][phase]) : "");
   drawNetwork($("netWork"), work.out, [work.x1, work.x2], work.out, p < 1 ? p : null);
   if (p < 1) requestAnimationFrame(animFrame); else anim = null;
 }
 // при движении ползунка — без анимации, а через 0.35 с после остановки — проход сигнала
 function inputsChanged() {
-  anim = null; $("calc").dataset.stage = "";
+  anim = null; setStage("");
   clearTimeout(animTimer);
   renderWork().then(() => {
     if ($("autoAnim").checked) animTimer = setTimeout(startAnim, 350);
   });
 }
 
-// Описание активаций и скорость обучения, лучшая в опытах (1500 эпох, входы −1..+1)
+// Описание активаций и скорость обучения, лучшая в опытах (1500 эпох, входы −1..+1): [текст, при 1 слое, при 2 слоях]
 const ACT_HINTS = {
-  sigmoid: ["плавная «ступенька» от 0 до 1, классика нейросетей.", 0.3],
-  tanh: ["та же «ступенька», но от −1 до 1 — вокруг нуля; обычно учится чуть лучше сигмоиды.", 0.1],
+  sigmoid: ["плавная «ступенька» от 0 до 1, классика нейросетей.", 0.3, 0.3],
+  tanh: ["та же «ступенька», но от −1 до 1 — вокруг нуля; обычно учится чуть лучше сигмоиды.", 0.1, 0.1],
   relu: ["«излом»: 0 при z < 0, иначе z. Ответ сети собирается из плоских граней — посмотрите на 3D-график. " +
-         "Восьми изломов мало для гладких холмов, поэтому здесь ReLU уступает (в больших сетях она — стандарт).", 0.03],
-  leaky: ["ReLU с маленьким наклоном 0.01 слева: нейрон не «умирает» насовсем, если z всегда < 0.", 0.03],
+         "Восьми изломов мало для гладких холмов, поэтому с одним слоем ReLU уступает (в больших сетях она — стандарт).", 0.03, 0.1],
+  leaky: ["ReLU с маленьким наклоном 0.01 слева: нейрон не «умирает» насовсем, если z всегда < 0.", 0.03, 0.1],
   gauss: ["«колокол»: каждый нейрон — не ступенька, а гребень. В опытах лучшая для холмов: " +
-          "яичная коробка и сомбреро учатся в 5–20 раз точнее, чем с сигмоидой.", 0.1],
+          "яичная коробка и сомбреро учатся в 5–20 раз точнее, чем с сигмоидой.", 0.1, 0.1],
 };
+const LAYERS_HINT = "Два скрытых слоя (2-8-8-1): второй слой собирает из «ступенек» первого более сложные формы. " +
+  "В опытах почти всё учится лучше, а гауссиана с двумя слоями выучивает даже кольцо без подсказки r² (MSE ~0.0003 против ~0.08). " +
+  "Эпоха считается примерно в 3 раза дольше.";
 
 // Мини-график функции активации f(z) для z от −4 до 4
 function drawActPlot(key) {
@@ -1012,8 +1130,10 @@ function render() {
   drawActPlot(S.act);
   const A = S.acts.find(o => o.key === S.act);
   $("hFormula").textContent = "h = " + A.formula;
-  const [actText, actLr] = ACT_HINTS[S.act];
-  $("actHint").innerHTML = `${A.name}: ${actText} Рекомендуемая скорость обучения — ${actLr}.` +
+  if (document.activeElement !== $("layers")) $("layers").value = String(S.layers);
+  const [actText, lr1, lr2] = ACT_HINTS[S.act], actLr = S.layers === 2 ? lr2 : lr1;
+  $("actHint").innerHTML = (S.layers === 2 ? LAYERS_HINT + "<br>" : "") +
+    `${A.name}: ${actText} Рекомендуемая скорость обучения${S.layers === 2 ? " для двух слоёв" : ""} — ${actLr}.` +
     (Math.abs(+$("lr").value - actLr) > 1e-9 ? `<button class="btn" id="actLrBtn">поставить ${actLr}</button>` : "");
   if ($("actLrBtn")) $("actLrBtn").onclick = () => {
     $("lr").value = actLr; $("lr").oninput();
@@ -1032,8 +1152,11 @@ function render() {
     ring: (S.r2
       ? "«Кольцо» радиуса 0.6 с подсказкой r²: сети больше не нужно собирать окружность из прямых — " +
         "достаточно выучить «горку» по одному числу r², ошибка падает до ~0.002."
-      : "«Кольцо» радиуса 0.6. Пример предела: 8 плавных «ступенек»-сигмоид плохо собираются в замкнутую кривую, " +
-        "сеть почти не учится (ошибка застревает около 0.07). Включите подсказку r² — и сравните.") +
+      : S.layers === 2
+      ? "«Кольцо» радиуса 0.6 без подсказки, но с двумя скрытыми слоями: второй слой собирает окружность из «ступенек» первого. " +
+        "Лучше всего это получается с гауссианой (ошибка ~0.0003–0.001), с другими активациями — заметно хуже."
+      : "«Кольцо» радиуса 0.6. Пример предела: 8 плавных «ступенек» одного слоя плохо собираются в замкнутую кривую, " +
+        "сеть почти не учится (ошибка застревает около 0.07). Включите подсказку r² или второй слой — и сравните.") +
       (neg ? "" : " На входах 0..1 видна только четверть кольца."),
     exp: "e ^ x2 зависит только от x2. Сеть должна сама понять, что x1 не важен: " +
          "посмотрите в таблице расчёта — вклад от x1 у нейронов станет маленьким или будет взаимно гаситься.",
@@ -1057,7 +1180,7 @@ async function poll() {
       $("lr").value = st.lr; $("lrVal").textContent = st.lr.toFixed(2);
       $("speed").value = st.speed; $("speedVal").textContent = st.speed;
     }
-    const changed = !S || st.epoch !== S.epoch || st.running !== S.running || st.message !== S.message || st.loaded !== S.loaded || st.func !== S.func || st.domain !== S.domain || st.r2 !== S.r2 || st.act !== S.act;
+    const changed = !S || st.epoch !== S.epoch || st.running !== S.running || st.message !== S.message || st.loaded !== S.loaded || st.func !== S.func || st.domain !== S.domain || st.r2 !== S.r2 || st.act !== S.act || st.layers !== S.layers;
     S = st;
     if (changed) render();
   } catch (e) {
@@ -1095,6 +1218,7 @@ $("fileInput").onchange = async () => {
   control({ action: "file", name: f.name, data });
   $("fileInput").value = "";
 };
+$("layers").onchange = () => { histTrain = []; histTest = []; control({ action: "layers", layers: +$("layers").value }); };
 $("act").onchange = () => { histTrain = []; histTest = []; control({ action: "act", act: $("act").value }); };
 $("r2").onchange = () => { histTrain = []; histTest = []; control({ action: "r2", on: $("r2").checked }); };
 $("domain").onchange = () => { histTrain = []; histTest = []; control({ action: "domain", domain: $("domain").value }); };

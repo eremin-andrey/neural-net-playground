@@ -184,6 +184,8 @@ class NeuralNetwork:
     def load(cls, path):
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
+        if d.get("layers", 1) != 1:
+            raise ValueError(f"{path}: сеть с {d['layers']} скрытыми слоями есть только в браузерной версии (index.html)")
         if d.get("act", "sigmoid") != "sigmoid":
             # другие функции активации (tanh, ReLU, …) есть только в браузерной версии index.html
             raise ValueError(f"{path}: активация «{d['act']}» есть только в браузерной версии (index.html), "
